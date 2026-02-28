@@ -75,6 +75,10 @@ async function createTables() {
     currency TEXT DEFAULT 'USD',
     paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
+  await pool.query(`
+  ALTER TABLE payments
+  ADD COLUMN IF NOT EXISTS method TEXT;
+`);
   `);
 
   console.log("✅ Tables ready");

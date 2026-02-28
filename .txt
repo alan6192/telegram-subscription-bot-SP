@@ -1,6 +1,6 @@
-BOT_TOKEN=8563741033:AAE6QyaYB0yQeBMPuTbnCp2vZYcBr7ier08
-SECRET_TOKEN=sk_telegram_9d82h3jd82j3jd923j
-DATABASE_URL=postgresql://postgres:nOdRJikvkKdoYHEzcOCkmsVAziUsdEtR@postgres.railway.internal:5432/railway
+BOT_TOKEN=8483300612:AAH1bt1QhfOnWF1wnHbx451OqLSe2f5Pb2U
+SECRET_TOKEN=sk_telegram_c7f3d91a8b2e4f6d9c1a7b5e3f8a2c6
+DATABASE_URL=postgresql://postgres:eqTScMjegryvHCMBnKoZezcjWdFPoQLG@postgres.railway.internal:5432/railway
 
-ADMIN_ID=8210583288
-CHANNEL_ID=-1003811907134
+ADMIN_ID=7429497912
+CHANNEL_ID=-1003885656377
