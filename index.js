@@ -197,7 +197,8 @@ async function renewUser(telegramId, days, amount) {
       WHERE id=$2
     `, [endDate, userId]);
 
-    return `✅ Renovado hasta ${endDate}`;
+    const cleanDate = endDate.toISOString().split("T")[0];
+    return `✅ Renovado hasta ${cleanDate}`;
 
   } catch (err) {
     console.error("Renew error:", err);
