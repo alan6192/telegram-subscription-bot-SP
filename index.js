@@ -215,8 +215,8 @@ app.listen(PORT, async () => {
   console.log("🚀 Server started");
   await initDB();
 
-  const webhookUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/webhook`;
-
+  const webhookUrl = `https://${process.env.RAILWAY_STATIC_DOMAIN}/webhook`;
+  console.log("Webhook URL:", webhoolUrl);
   await bot.setWebHook(webhookUrl, {
     secret_token: SECRET_TOKEN
   });
