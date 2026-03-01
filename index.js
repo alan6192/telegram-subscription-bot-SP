@@ -1,14 +1,32 @@
 require("dotenv").config();
 const express = require("express");
 const { Pool } = require("pg");
+const TelegramBot = require("node-telegram-bot-api");
 
 const app = express();
 app.use(express.json());
 
+/* ==============================
+   ENV
+============================== */
+const PORT = process.env.PORT || 3000;
+const TOKEN = process.env.BOT_TOKEN;
+const SECRET_TOKEN = process.env.SECRET_TOKEN;
+const ADMIN_ID = process.env.ADMIN_ID;
+const CHANNEL_ID = process.env.CHANNEL_ID;
+
+/* ==============================
+   DATABASE
+============================== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+/* ==============================
+   TELEGRAM BOT
+============================== */
+const bot = new TelegramBot(TOKEN);
 
 /* ==============================
    INIT DATABASE
@@ -32,7 +50,6 @@ async function initDB() {
       );
     `);
 
-    // 🔥 Limpia duplicadas activas dejando solo la más reciente
     await pool.query(`
       UPDATE subscriptions s
       SET status = 'expired'
@@ -45,7 +62,6 @@ async function initDB() {
       );
     `);
 
-    // 🔒 Índice único parcial
     await pool.query(`
       DO $$
       BEGIN
@@ -61,13 +77,14 @@ async function initDB() {
     `);
 
     console.log("✅ DB ready");
+
   } catch (err) {
     console.error("Migration error:", err);
   }
 }
 
 /* ==============================
-   CREATE OR RENEW SUBSCRIPTION
+   CREATE OR RENEW
 ============================== */
 async function createOrRenewSubscription({ user_id, username, days, amount, method }) {
 
@@ -76,7 +93,6 @@ async function createOrRenewSubscription({ user_id, username, days, amount, meth
   try {
     await client.query("BEGIN");
 
-    // 1️⃣ Expira cualquier activa anterior
     await client.query(`
       UPDATE subscriptions
       SET status='expired'
@@ -87,7 +103,6 @@ async function createOrRenewSubscription({ user_id, username, days, amount, meth
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + days);
 
-    // 2️⃣ Insert nueva activa
     await client.query(`
       INSERT INTO subscriptions 
       (user_id, username, start_date, end_date, status, days, amount, method)
@@ -104,6 +119,13 @@ async function createOrRenewSubscription({ user_id, username, days, amount, meth
 
     await client.query("COMMIT");
 
+    // 🔥 Notificar al usuario por Telegram
+    try {
+      await bot.sendMessage(user_id, `✅ Subscription activated for ${days} days.`);
+    } catch (e) {
+      console.log("No se pudo notificar al usuario");
+    }
+
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -113,10 +135,35 @@ async function createOrRenewSubscription({ user_id, username, days, amount, meth
 }
 
 /* ==============================
-   ROUTES
+   WEBHOOK
 ============================== */
+app.post("/webhook", async (req, res) => {
 
-// 🔹 Crear nuevo usuario o renovar
+  const telegramSecret = req.headers["x-telegram-bot-api-secret-token"];
+
+  if (telegramSecret !== SECRET_TOKEN) {
+    return res.sendStatus(403);
+  }
+
+  try {
+    await bot.processUpdate(req.body);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook error:", err);
+    res.sendStatus(500);
+  }
+});
+
+/* ==============================
+   TELEGRAM COMMANDS
+============================== */
+bot.onText(/\/start/, async (msg) => {
+  await bot.sendMessage(msg.chat.id, "Bot active ✅");
+});
+
+/* ==============================
+   ROUTES (SE MANTIENEN IGUAL)
+============================== */
 app.post("/renew", async (req, res) => {
   try {
     const { user_id, username, days, amount, method } = req.body;
@@ -143,32 +190,9 @@ app.post("/renew", async (req, res) => {
   }
 });
 
-// 🔹 Verificar estado
-app.get("/status/:user_id", async (req, res) => {
-  try {
-    const { user_id } = req.params;
-
-    const result = await pool.query(`
-      SELECT * FROM subscriptions
-      WHERE user_id=$1 AND status='active'
-      LIMIT 1
-    `, [user_id]);
-
-    if (result.rows.length === 0) {
-      return res.json({ active: false });
-    }
-
-    res.json({
-      active: true,
-      subscription: result.rows[0]
-    });
-
-  } catch (err) {
-    res.status(500).json({ error: "Internal error" });
-  }
-});
-
-// 🔹 Cron automático para expirar vencidas
+/* ==============================
+   EXPIRE CRON
+============================== */
 async function expireSubscriptions() {
   try {
     await pool.query(`
@@ -182,15 +206,20 @@ async function expireSubscriptions() {
   }
 }
 
-setInterval(expireSubscriptions, 60 * 60 * 1000); // cada hora
+setInterval(expireSubscriptions, 60 * 60 * 1000);
 
 /* ==============================
    START SERVER
 ============================== */
-const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, async () => {
   console.log("🚀 Server started");
   await initDB();
-  console.log("✅ DB connected");
+
+  const webhookUrl = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/webhook`;
+
+  await bot.setWebHook(webhookUrl, {
+    secret_token: SECRET_TOKEN
+  });
+
+  console.log("✅ Webhook configured");
 });
