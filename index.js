@@ -1,6 +1,3 @@
-# COMPLETE index.js for Telegram Subscription Bot - FIXED VERSION
-# Copy ALL content below and save as index.js
-
 require("dotenv").config();
 const express = require("express");
 const { Pool } = require("pg");
