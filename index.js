@@ -7,9 +7,7 @@ const cron = require("node-cron");
 const app = express();
 app.use(express.json());
 
-/* ======================
-   ENV VALIDATION
-====================== */
+/* ================= ENV ================= */
 
 const {
   BOT_TOKEN,
@@ -25,9 +23,7 @@ if (!BOT_TOKEN || !SECRET_TOKEN || !ADMIN_ID || !CHANNEL_ID || !DATABASE_URL) {
   process.exit(1);
 }
 
-/* ======================
-   DATABASE
-====================== */
+/* ================= DATABASE ================= */
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -41,9 +37,7 @@ pool.connect()
     process.exit(1);
   });
 
-/* ======================
-   SAFE MIGRATIONS
-====================== */
+/* ================= MIGRATIONS ================= */
 
 async function runMigrations() {
   try {
@@ -75,21 +69,18 @@ async function runMigrations() {
       CREATE TABLE IF NOT EXISTS payments(
         id SERIAL PRIMARY KEY,
         subscription_id INTEGER REFERENCES subscriptions(id),
+        method TEXT,
         amount NUMERIC,
         currency TEXT DEFAULT 'USD',
         paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    // SAFE COLUMN MIGRATIONS
+    // Índice único parcial → solo 1 activa por usuario
     await pool.query(`
-      ALTER TABLE payments
-      ADD COLUMN IF NOT EXISTS method TEXT;
-    `);
-
-    await pool.query(`
-      ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT 'pending';
+      CREATE UNIQUE INDEX IF NOT EXISTS one_active_subscription
+      ON subscriptions(user_id)
+      WHERE status='active';
     `);
 
     console.log("✅ Migrations complete");
@@ -101,9 +92,7 @@ async function runMigrations() {
 
 runMigrations();
 
-/* ======================
-   TELEGRAM HELPERS
-====================== */
+/* ================= TELEGRAM ================= */
 
 async function sendMessage(chatId, text) {
   try {
@@ -112,7 +101,7 @@ async function sendMessage(chatId, text) {
       { chat_id: chatId, text }
     );
   } catch (err) {
-    console.error("Telegram send error:", err.response?.data || err.message);
+    console.error("Telegram error:", err.response?.data || err.message);
   }
 }
 
@@ -123,13 +112,11 @@ async function removeFromGroup(userId) {
       { chat_id: CHANNEL_ID, user_id: userId }
     );
   } catch (err) {
-    console.error("Remove user error:", err.response?.data || err.message);
+    console.error("Remove error:", err.response?.data || err.message);
   }
 }
 
-/* ======================
-   USER REGISTER
-====================== */
+/* ================= REGISTER ================= */
 
 async function registerUser(member) {
   try {
@@ -146,7 +133,7 @@ async function registerUser(member) {
 
     await sendMessage(
       ADMIN_ID,
-      `🆕 Nuevo usuario\nID: ${member.id}\nUsername: @${member.username || "N/A"}\n\nUsa:\n/renew ${member.id} dias cuanto`
+      `🆕 Nuevo usuario\nID: ${member.id}\nUsername: @${member.username || "N/A"}\n\nUsa:\n/renew ${member.id} 30 20`
     );
 
   } catch (err) {
@@ -154,9 +141,7 @@ async function registerUser(member) {
   }
 }
 
-/* ======================
-   RENEW
-====================== */
+/* ================= RENEW (PRO MODEL) ================= */
 
 async function renewUser(telegramId, days, amount) {
   try {
@@ -171,6 +156,14 @@ async function renewUser(telegramId, days, amount) {
 
     const userId = userRes.rows[0].id;
 
+    // 1️⃣ Cerrar activa anterior
+    await pool.query(`
+      UPDATE subscriptions
+      SET status='expired'
+      WHERE user_id=$1 AND status='active'
+    `, [userId]);
+
+    // 2️⃣ Crear nueva activa
     const sub = await pool.query(`
       INSERT INTO subscriptions(user_id, start_date, end_date, status)
       VALUES(
@@ -185,11 +178,13 @@ async function renewUser(telegramId, days, amount) {
     const subId = sub.rows[0].id;
     const endDate = sub.rows[0].end_date;
 
+    // 3️⃣ Registrar pago
     await pool.query(`
-      INSERT INTO payments(subscription_id, amount, method)
+      INSERT INTO payments(subscription_id, method, amount)
       VALUES($1,$2,$3)
-    `, [subId, amount, "Manual"]);
+    `, [subId, "Manual", amount]);
 
+    // 4️⃣ Actualizar usuario
     await pool.query(`
       UPDATE users
       SET subscription_status='active',
@@ -202,13 +197,11 @@ async function renewUser(telegramId, days, amount) {
 
   } catch (err) {
     console.error("Renew error:", err);
-    return "❌ Error interno al renovar";
+    return "❌ Error interno";
   }
 }
 
-/* ======================
-   ADVANCED STATS
-====================== */
+/* ================= STATS ================= */
 
 async function stats() {
   try {
@@ -247,9 +240,7 @@ MRR: $${mrr.rows[0].total}
   }
 }
 
-/* ======================
-   CRON DAILY
-====================== */
+/* ================= CRON ================= */
 
 cron.schedule("0 9 * * *", async () => {
 
@@ -298,15 +289,12 @@ cron.schedule("0 9 * * *", async () => {
 
 });
 
-/* ======================
-   WEBHOOK
-====================== */
+/* ================= WEBHOOK ================= */
 
 app.post("/webhook", async (req, res) => {
 
-  if (
-    req.headers["x-telegram-bot-api-secret-token"] !== SECRET_TOKEN
-  ) return res.sendStatus(403);
+  if (req.headers["x-telegram-bot-api-secret-token"] !== SECRET_TOKEN)
+    return res.sendStatus(403);
 
   const update = req.body;
 
@@ -321,15 +309,14 @@ app.post("/webhook", async (req, res) => {
   }
 
   if (!update.message) return res.sendStatus(200);
-
-  if (update.message.from.id != ADMIN_ID)
-    return res.sendStatus(200);
+  if (update.message.from.id != ADMIN_ID) return res.sendStatus(200);
 
   const text = update.message.text || "";
 
   if (text.startsWith("/renew")) {
 
     const parts = text.split(" ");
+
     const response = await renewUser(
       parts[1],
       Number(parts[2]),
@@ -347,9 +334,7 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-/* ======================
-   ROOT
-====================== */
+/* ================= ROOT ================= */
 
 app.get("/", (_, res) => {
   res.send("Bot running 🚀");
