@@ -52,7 +52,7 @@ async function createTables() {
       id SERIAL PRIMARY KEY,
       subscription_id INTEGER REFERENCES subscriptions(id),
       amount NUMERIC(10,2) NOT NULL,
-      currency TEXT DEFAULT 'USD',
+      currency TEXT DEFAULT 'COP',
       method TEXT,
       paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
