@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 const express = require("express");
 const { Pool } = require("pg");
@@ -14,6 +13,9 @@ const ADMIN_ID = Number(process.env.ADMIN_ID);
 
 let GROUP_ID = process.env.CHANNEL_ID || null;
 
+// Safety guard: prevent mass removals if dates/config go wrong
+const MAX_AUTOREMOVE_PER_RUN = Number(process.env.MAX_AUTOREMOVE_PER_RUN || 3);
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -22,6 +24,14 @@ const pool = new Pool({
 pool.connect()
   .then(() => console.log("DB connected"))
   .catch(console.error);
+
+function isoToDisplay(iso) {
+  if (!iso || typeof iso !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return String(iso);
+  const [y, m, d] = iso.split('-');
+  const months = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  const mm = Number(m);
+  return `${Number(d)} ${months[mm - 1] || m} ${y}`;
+}
 
 async function createTables() {
   await pool.query(`
@@ -95,7 +105,8 @@ let adminSession = null;
 async function registerUser(user) {
   await pool.query(`
     INSERT INTO users(telegram_id, username, first_name)
-    VALUES($1, $2, $3) ON CONFLICT(telegram_id) DO NOTHING
+    VALUES($1, $2, $3)
+    ON CONFLICT(telegram_id) DO NOTHING
   `, [user.id, user.username || null, user.first_name || null]);
 }
 
@@ -109,25 +120,28 @@ async function renewUser(telegramId, days, amount, paymentMethod) {
 
   const userId = userRes.rows[0].id;
 
+  // Close previous active subscriptions for this user
   await pool.query(`
     UPDATE subscriptions SET status='expired'
     WHERE user_id=$1 AND status='active'
   `, [userId]);
 
+  // Determine renewal
   const prevSubs = await pool.query(
     `SELECT 1 FROM subscriptions WHERE user_id=$1 LIMIT 1`,
     [userId]
   );
   const isRenewal = prevSubs.rowCount > 0;
 
+  // IMPORTANT: Return end_date as ISO string and store DATE in DB (no locale strings)
   const sub = await pool.query(`
     INSERT INTO subscriptions(user_id, start_date, end_date, status, is_renewal)
-    VALUES($1, CURRENT_DATE, CURRENT_DATE + $2 * INTERVAL '1 day', 'active', $3)
-    RETURNING id, end_date
+    VALUES($1, CURRENT_DATE, (CURRENT_DATE + $2 * INTERVAL '1 day')::date, 'active', $3)
+    RETURNING id, end_date::text AS end_date
   `, [userId, days, isRenewal]);
 
   const subId = sub.rows[0].id;
-  const endDate = sub.rows[0].end_date.toLocaleDateString('es-CO');  // FORMATO LEGIBLE
+  const endDateIso = sub.rows[0].end_date; // YYYY-MM-DD
 
   await pool.query(`
     INSERT INTO payments(subscription_id, amount, method)
@@ -135,14 +149,12 @@ async function renewUser(telegramId, days, amount, paymentMethod) {
   `, [subId, amount, paymentMethod || 'manual']);
 
   await pool.query(`
-    UPDATE users SET subscription_status='active', subscription_end=$1
+    UPDATE users
+    SET subscription_status='active', subscription_end=$1::date
     WHERE id=$2
-  `, [endDate, userId]);
+  `, [endDateIso, userId]);
 
-  return `✅ Suscripción registrada!
-Vence: ${endDate}
-Tipo: ${isRenewal ? '🔄 Renovación' : '➕ Alta nueva'}
-Monto: $${amount} (${paymentMethod})`;
+  return `✅ Suscripción registrada!\nVence: ${isoToDisplay(endDateIso)} (${endDateIso})\nTipo: ${isRenewal ? '🔄 Renovación' : '➕ Alta nueva'}\nMonto: $${amount} (${paymentMethod})`;
 }
 
 async function stats() {
@@ -152,7 +164,10 @@ async function stats() {
     const monthStart = new Date();
     monthStart.setDate(1);
 
-    const mrr = await pool.query(`SELECT COALESCE(SUM(amount), 0) total FROM payments WHERE paid_at >= $1::timestamp`, [monthStart]);
+    const mrr = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) total FROM payments WHERE paid_at >= $1::timestamp`,
+      [monthStart]
+    );
     const totalRevenue = await pool.query(`SELECT COALESCE(SUM(amount), 0) total FROM payments`);
     const avgTicket = await pool.query(`SELECT COALESCE(AVG(amount), 0) avg FROM payments`);
 
@@ -168,17 +183,11 @@ async function stats() {
       WHERE s.is_renewal = TRUE AND p.paid_at >= $1::timestamp
     `, [monthStart]);
 
-    const arpu = newSubs.rows[0].count > 0 ? (mrr.rows[0].total / newSubs.rows[0].count).toFixed(2) : 0;
+    const arpu = Number(newSubs.rows[0].count) > 0
+      ? (Number(mrr.rows[0].total) / Number(newSubs.rows[0].count)).toFixed(2)
+      : '0.00';
 
-    return `
-📊 STATS MES ACTUAL
-👥 Usuarios activos: ${active.rows[0].count}
-💰 Ingresos mes: $${Number(mrr.rows[0].total).toFixed(2)}
-💎 Ingresos total: $${Number(totalRevenue.rows[0].total).toFixed(2)}
-➕ Altas nuevas: ${newSubs.rows[0].count}
-🔄 Renovaciones: ${renewals.rows[0].count}
-📈 Ticket promedio: $${Number(avgTicket.rows[0].avg).toFixed(2)}
-🎯 ARPU: $${arpu}`;
+    return `\n📊 STATS MES ACTUAL\n👥 Usuarios activos: ${active.rows[0].count}\n💰 Ingresos mes: $${Number(mrr.rows[0].total).toFixed(2)}\n💎 Ingresos total: $${Number(totalRevenue.rows[0].total).toFixed(2)}\n➕ Altas nuevas: ${newSubs.rows[0].count}\n🔄 Renovaciones: ${renewals.rows[0].count}\n📈 Ticket promedio: $${Number(avgTicket.rows[0].avg).toFixed(2)}\n🎯 ARPU: $${arpu}`;
   } catch (e) {
     console.error('Stats error:', e);
     return '❌ Error calculando stats';
@@ -194,57 +203,66 @@ async function monthReport(year, month) {
   const end = new Date(Date.UTC(y, m, 1, 0, 0, 0));
 
   const revenue = await pool.query(
-    `SELECT COALESCE(SUM(amount),0) total
-     FROM payments
-     WHERE paid_at >= $1::timestamptz AND paid_at < $2::timestamptz`,
+    `SELECT COALESCE(SUM(amount),0) total\n     FROM payments\n     WHERE paid_at >= $1::timestamptz AND paid_at < $2::timestamptz`,
     [start.toISOString(), end.toISOString()]
   );
 
   const newSubs = await pool.query(
-    `SELECT COUNT(*) 
-     FROM subscriptions s
-     JOIN payments p ON p.subscription_id = s.id
-     WHERE s.is_renewal = FALSE
-       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
+    `SELECT COUNT(*)\n     FROM subscriptions s\n     JOIN payments p ON p.subscription_id = s.id\n     WHERE s.is_renewal = FALSE\n       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
     [start.toISOString(), end.toISOString()]
   );
 
   const renewals = await pool.query(
-    `SELECT COUNT(*) 
-     FROM subscriptions s
-     JOIN payments p ON p.subscription_id = s.id
-     WHERE s.is_renewal = TRUE
-       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
+    `SELECT COUNT(*)\n     FROM subscriptions s\n     JOIN payments p ON p.subscription_id = s.id\n     WHERE s.is_renewal = TRUE\n       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
     [start.toISOString(), end.toISOString()]
   );
 
-  return `📅 REPORTE ${y}-${String(m).padStart(2,"0")}
-Ingresos: $${Number(revenue.rows[0].total).toFixed(2)}
-Altas nuevas: ${newSubs.rows[0].count}
-Renovaciones: ${renewals.rows[0].count}`;
+  return `📅 REPORTE ${y}-${String(m).padStart(2,"0")}\nIngresos: $${Number(revenue.rows[0].total).toFixed(2)}\nAltas nuevas: ${newSubs.rows[0].count}\nRenovaciones: ${renewals.rows[0].count}`;
 }
 
 cron.schedule("0 9 * * *", async () => {
   console.log("Daily check");
 
+  // Notify expiring today
   const expiring = await pool.query(`
-    SELECT telegram_id, username FROM users 
-    WHERE subscription_status='active' AND subscription_end = CURRENT_DATE
+    SELECT telegram_id, username
+    FROM users
+    WHERE subscription_status='active'
+      AND subscription_end IS NOT NULL
+      AND subscription_end = CURRENT_DATE
   `);
 
   for (const u of expiring.rows) {
-    await sendMessage(ADMIN_ID, `⚠️ Vence hoy: ${u.username || u.telegram_id}`);
+    await sendMessage(
+      ADMIN_ID,
+      `⚠️ Vence hoy:\nUsername: ${u.username || 'sin username'}\nTelegram ID: ${u.telegram_id}`
+    );
   }
 
+  // Auto-remove after 3 days past end date
   const expired = await pool.query(`
-    SELECT telegram_id, id, username FROM users 
-    WHERE subscription_status='active' AND subscription_end <= CURRENT_DATE - INTERVAL '3 days'
+    SELECT telegram_id, id, username, subscription_end
+    FROM users
+    WHERE subscription_status='active'
+      AND subscription_end IS NOT NULL
+      AND subscription_end <= (CURRENT_DATE - INTERVAL '3 days')
   `);
+
+  if (expired.rowCount > MAX_AUTOREMOVE_PER_RUN) {
+    await sendMessage(
+      ADMIN_ID,
+      `🚨 Seguridad: ${expired.rowCount} usuarios cumplen condición de expulsión.\nNo se ejecutó auto-expulsión.\nRevisa users.subscription_end.`
+    );
+    return;
+  }
 
   for (const u of expired.rows) {
     await removeFromGroup(u.telegram_id);
     await pool.query(`UPDATE users SET subscription_status='inactive' WHERE id=$1`, [u.id]);
-    await sendMessage(ADMIN_ID, `❌ Removido: ${u.username || u.telegram_id}`);
+    await sendMessage(
+      ADMIN_ID,
+      `❌ Removido por no renovar:\nUsername: ${u.username || 'sin username'}\nTelegram ID: ${u.telegram_id}\nVenció: ${u.subscription_end}`
+    );
   }
 });
 
@@ -266,13 +284,12 @@ app.post("/webhook", async (req, res) => {
     for (const member of update.message.new_chat_members) {
       if (member.is_bot) continue;
       await registerUser(member);
-
-      await sendMessage(ADMIN_ID, 
-        `👤 Usuario entró:
-Username: ${member.username || 'sin username'}
-Telegram ID: ${member.id}`
+      await sendMessage(
+        ADMIN_ID,
+        `👤 Usuario entró:\nUsername: ${member.username || 'sin username'}\nTelegram ID: ${member.id}`
       );
     }
+
     return res.sendStatus(200);
   }
 
@@ -281,10 +298,9 @@ Telegram ID: ${member.id}`
 
   if (msg.from.id !== ADMIN_ID) return res.sendStatus(200);
 
-  const text = msg.text || "";
+  const text = (msg.text || "").trim();
   const chatId = msg.chat.id;
 
-  // /month NUEVO
   if (text.startsWith("/month ")) {
     const parts = text.split(" ");
     const year = parts[1];
@@ -294,14 +310,12 @@ Telegram ID: ${member.id}`
     return res.sendStatus(200);
   }
 
-  // /stats
   if (text === "/stats") {
     const s = await stats();
     await sendMessage(chatId, s);
     return res.sendStatus(200);
   }
 
-  // INICIAR /renew
   if (text.startsWith("/renew ")) {
     const telegramId = text.split(" ")[1];
     if (!telegramId || isNaN(telegramId)) {
@@ -310,13 +324,12 @@ Telegram ID: ${member.id}`
     }
 
     adminSession = { step: 'days', telegramId, chatId };
-    await sendMessage(chatId, `👤 Nuevo ingreso: ${telegramId}\n\n¿Cuántos días contrató?`);
+    await sendMessage(chatId, `👤 Renovar/Alta: ${telegramId}\n\n¿Cuántos días contrató?`);
     return res.sendStatus(200);
   }
 
-  // RESPUESTAS FLUJO
   if (adminSession && adminSession.chatId === chatId) {
-    const response = text.trim();
+    const response = text;
 
     if (adminSession.step === 'days') {
       const days = parseInt(response);
@@ -351,7 +364,7 @@ Telegram ID: ${member.id}`
   res.sendStatus(200);
 });
 
-app.get("/", (_, res) => res.send("Subscription Bot v3.0 - MONTH REPORT ✅"));
+app.get("/", (_, res) => res.send("Subscription Bot - FIXED DATE STORAGE + GUARD ✅"));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server on port ${PORT}`));
