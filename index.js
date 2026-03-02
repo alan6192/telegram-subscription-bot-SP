@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 const express = require("express");
 const { Pool } = require("pg");
@@ -52,7 +53,7 @@ async function createTables() {
       id SERIAL PRIMARY KEY,
       subscription_id INTEGER REFERENCES subscriptions(id),
       amount NUMERIC(10,2) NOT NULL,
-      currency TEXT DEFAULT 'COP',
+      currency TEXT DEFAULT 'USD',
       method TEXT,
       paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
@@ -126,7 +127,7 @@ async function renewUser(telegramId, days, amount, paymentMethod) {
   `, [userId, days, isRenewal]);
 
   const subId = sub.rows[0].id;
-  const endDate = sub.rows[0].end_date;
+  const endDate = sub.rows[0].end_date.toLocaleDateString('es-CO');  // FORMATO LEGIBLE
 
   await pool.query(`
     INSERT INTO payments(subscription_id, amount, method)
@@ -182,6 +183,45 @@ async function stats() {
     console.error('Stats error:', e);
     return '❌ Error calculando stats';
   }
+}
+
+async function monthReport(year, month) {
+  const y = Number(year);
+  const m = Number(month);
+  if (!y || !m || m < 1 || m > 12) return "❌ Uso: /month YYYY MM (ej: /month 2026 3)";
+
+  const start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
+  const end = new Date(Date.UTC(y, m, 1, 0, 0, 0));
+
+  const revenue = await pool.query(
+    `SELECT COALESCE(SUM(amount),0) total
+     FROM payments
+     WHERE paid_at >= $1::timestamptz AND paid_at < $2::timestamptz`,
+    [start.toISOString(), end.toISOString()]
+  );
+
+  const newSubs = await pool.query(
+    `SELECT COUNT(*) 
+     FROM subscriptions s
+     JOIN payments p ON p.subscription_id = s.id
+     WHERE s.is_renewal = FALSE
+       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
+    [start.toISOString(), end.toISOString()]
+  );
+
+  const renewals = await pool.query(
+    `SELECT COUNT(*) 
+     FROM subscriptions s
+     JOIN payments p ON p.subscription_id = s.id
+     WHERE s.is_renewal = TRUE
+       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
+    [start.toISOString(), end.toISOString()]
+  );
+
+  return `📅 REPORTE ${y}-${String(m).padStart(2,"0")}
+Ingresos: $${Number(revenue.rows[0].total).toFixed(2)}
+Altas nuevas: ${newSubs.rows[0].count}
+Renovaciones: ${renewals.rows[0].count}`;
 }
 
 cron.schedule("0 9 * * *", async () => {
@@ -244,35 +284,44 @@ Telegram ID: ${member.id}`
   const text = msg.text || "";
   const chatId = msg.chat.id;
 
-  // COMANDOS
+  // /month NUEVO
+  if (text.startsWith("/month ")) {
+    const parts = text.split(" ");
+    const year = parts[1];
+    const month = parts[2];
+    const r = await monthReport(year, month);
+    await sendMessage(chatId, r);
+    return res.sendStatus(200);
+  }
+
+  // /stats
   if (text === "/stats") {
     const s = await stats();
     await sendMessage(chatId, s);
     return res.sendStatus(200);
   }
 
-  // FLUJO RENEW
+  // INICIAR /renew
   if (text.startsWith("/renew ")) {
-    const parts = text.split(" ");
-    const telegramId = parts[1];
-    if (!telegramId) {
-      await sendMessage(chatId, "❌ Uso: /renew TELEGRAM_ID");
+    const telegramId = text.split(" ")[1];
+    if (!telegramId || isNaN(telegramId)) {
+      await sendMessage(chatId, "❌ Uso: /renew TELEGRAM_ID\nEj: /renew 5863380360");
       return res.sendStatus(200);
     }
 
     adminSession = { step: 'days', telegramId, chatId };
-    await sendMessage(chatId, `👤 Nuevo: ${telegramId}\n¿Cuántos días?`);
+    await sendMessage(chatId, `👤 Nuevo ingreso: ${telegramId}\n\n¿Cuántos días contrató?`);
     return res.sendStatus(200);
   }
 
   // RESPUESTAS FLUJO
   if (adminSession && adminSession.chatId === chatId) {
-    const response = parseFloat(text) || text.trim();
+    const response = text.trim();
 
     if (adminSession.step === 'days') {
       const days = parseInt(response);
       if (isNaN(days) || days <= 0) {
-        await sendMessage(chatId, "❌ Días inválido");
+        await sendMessage(chatId, "❌ Días inválido (número > 0)");
         return res.sendStatus(200);
       }
       adminSession.days = days;
@@ -283,12 +332,12 @@ Telegram ID: ${member.id}`
     } else if (adminSession.step === 'amount') {
       const amount = parseFloat(response);
       if (isNaN(amount) || amount <= 0) {
-        await sendMessage(chatId, "❌ Monto inválido");
+        await sendMessage(chatId, "❌ Monto inválido (número > 0)");
         return res.sendStatus(200);
       }
       adminSession.amount = amount;
       adminSession.step = 'method';
-      await sendMessage(chatId, "¿Método de pago?");
+      await sendMessage(chatId, "¿Método? (transferencia, nequi, etc)");
       return res.sendStatus(200);
 
     } else if (adminSession.step === 'method') {
@@ -302,7 +351,7 @@ Telegram ID: ${member.id}`
   res.sendStatus(200);
 });
 
-app.get("/", (_, res) => res.send("Subscription Bot v2.0 ✅"));
+app.get("/", (_, res) => res.send("Subscription Bot v3.0 - MONTH REPORT ✅"));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server on ${PORT}`));
+app.listen(PORT, () => console.log(`Server on port ${PORT}`));
