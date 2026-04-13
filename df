@@ -1,0 +1,509 @@
+[1mdiff --git a/index.js b/index.js[m
+[1mindex 86e1577..cc691ba 100644[m
+[1m--- a/index.js[m
+[1m+++ b/index.js[m
+[36m@@ -1,226 +1,496 @@[m
+ require("dotenv").config();[m
+ const express = require("express");[m
+ const { Pool } = require("pg");[m
+[31m-const TelegramBot = require("node-telegram-bot-api");[m
+[32m+[m[32mconst axios = require("axios");[m
+[32m+[m[32mconst cron = require("node-cron");[m
+ [m
+ const app = express();[m
+ app.use(express.json());[m
+ [m
+[31m-/* ==============================[m
+[31m-   ENV[m
+[31m-============================== */[m
+[31m-const PORT = process.env.PORT || 3000;[m
+[31m-const TOKEN = process.env.BOT_TOKEN;[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mENV[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32mconst BOT_TOKEN = process.env.BOT_TOKEN;[m
+ const SECRET_TOKEN = process.env.SECRET_TOKEN;[m
+[31m-const ADMIN_ID = process.env.ADMIN_ID;[m
+[31m-const CHANNEL_ID = process.env.CHANNEL_ID;[m
+[32m+[m[32mconst ADMIN_ID = Number(process.env.ADMIN_ID);[m
+[32m+[m
+[32m+[m[32mlet GROUP_ID = process.env.CHANNEL_ID || null;[m
+[32m+[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mDATABASE[m
+[32m+[m[32m====================== */[m
+ [m
+[31m-/* ==============================[m
+[31m-   DATABASE[m
+[31m-============================== */[m
+ const pool = new Pool({[m
+   connectionString: process.env.DATABASE_URL,[m
+   ssl: { rejectUnauthorized: false }[m
+ });[m
+ [m
+[31m-/* ==============================[m
+[31m-   TELEGRAM BOT[m
+[31m-============================== */[m
+[31m-const bot = new TelegramBot(TOKEN);[m
+[32m+[m[32mpool.connect()[m
+[32m+[m[32m  .then(() => console.log("DB connected"))[m
+[32m+[m[32m  .catch(console.error);[m
+[32m+[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mCREATE TABLES - MEJORADO PARA BI[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32masync function createTables() {[m
+[32m+[m[32m  // Tabla users: estado operativo actual[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    CREATE TABLE IF NOT EXISTS users([m
+[32m+[m[32m      id SERIAL PRIMARY KEY,[m
+[32m+[m[32m      telegram_id BIGINT UNIQUE NOT NULL,[m
+[32m+[m[32m      username TEXT,[m
+[32m+[m[32m      first_name TEXT,[m
+[32m+[m[32m      subscription_status TEXT DEFAULT 'inactive',[m
+[32m+[m[32m      subscription_end DATE,[m
+[32m+[m[32m      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP[m
+[32m+[m[32m    );[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  // Tabla subscriptions: HISTÓRICO COMPLETO para analítica[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    CREATE TABLE IF NOT EXISTS subscriptions([m
+[32m+[m[32m      id SERIAL PRIMARY KEY,[m
+[32m+[m[32m      user_id INTEGER REFERENCES users(id),[m
+[32m+[m[32m      start_date DATE NOT NULL,[m
+[32m+[m[32m      end_date DATE NOT NULL,[m
+[32m+[m[32m      status TEXT DEFAULT 'active',[m
+[32m+[m[32m      is_renewal BOOLEAN DEFAULT FALSE,[m
+[32m+[m[32m      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP[m
+[32m+[m[32m    );[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  // Tabla payments: DETALLE FINANCIERO[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    CREATE TABLE IF NOT EXISTS payments([m
+[32m+[m[32m      id SERIAL PRIMARY KEY,[m
+[32m+[m[32m      subscription_id INTEGER REFERENCES subscriptions(id),[m
+[32m+[m[32m      amount NUMERIC(10,2) NOT NULL,[m
+[32m+[m[32m      currency TEXT DEFAULT 'USD',[m
+[32m+[m[32m      payment_method TEXT,  -- Nuevo: transferencia, nequi, etc[m
+[32m+[m[32m      paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP[m
+[32m+[m[32m    );[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  console.log("Tables ready - BI ready");[m
+[32m+[m[32m}[m
+ [m
+[31m-/* ==============================[m
+[31m-   INIT DATABASE[m
+[31m-============================== */[m
+[31m-async function initDB() {[m
+[31m-  try {[m
+[31m-    console.log("🔄 Initializing DB...");[m
+[32m+[m[32mcreateTables();[m
+ [m
+[31m-    await pool.query(`[m
+[31m-      CREATE TABLE IF NOT EXISTS subscriptions ([m
+[31m-        id SERIAL PRIMARY KEY,[m
+[31m-        user_id BIGINT NOT NULL,[m
+[31m-        username TEXT,[m
+[31m-        start_date TIMESTAMP NOT NULL,[m
+[31m-        end_date TIMESTAMP NOT NULL,[m
+[31m-        status TEXT NOT NULL,[m
+[31m-        days INTEGER NOT NULL,[m
+[31m-        amount NUMERIC(10,2) NOT NULL,[m
+[31m-        method TEXT NOT NULL,[m
+[31m-        created_at TIMESTAMP DEFAULT NOW()[m
+[31m-      );[m
+[31m-    `);[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mTELEGRAM HELPERS[m
+[32m+[m[32m====================== */[m
+ [m
+[31m-    await pool.query(`[m
+[31m-      UPDATE subscriptions s[m
+[31m-      SET status = 'expired'[m
+[31m-      WHERE status = 'active'[m
+[31m-      AND id NOT IN ([m
+[31m-        SELECT MAX(id)[m
+[31m-        FROM subscriptions[m
+[31m-        WHERE status = 'active'[m
+[31m-        GROUP BY user_id[m
+[31m-      );[m
+[31m-    `);[m
+[31m-[m
+[31m-    await pool.query(`[m
+[31m-      DO $$[m
+[31m-      BEGIN[m
+[31m-        IF NOT EXISTS ([m
+[31m-          SELECT 1 FROM pg_indexes[m
+[31m-          WHERE indexname = 'one_active_subscription'[m
+[31m-        ) THEN[m
+[31m-          CREATE UNIQUE INDEX one_active_subscription[m
+[31m-          ON subscriptions(user_id)[m
+[31m-          WHERE status='active';[m
+[31m-        END IF;[m
+[31m-      END$$;[m
+[31m-    `);[m
+[31m-[m
+[31m-    console.log("✅ DB ready");[m
+[31m-[m
+[31m-  } catch (err) {[m
+[31m-    console.error("Migration error:", err);[m
+[32m+[m[32masync function sendMessage(chatId, text) {[m
+[32m+[m[32m  try {[m
+[32m+[m[32m    await axios.post([m
+[32m+[m[32m      `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,[m
+[32m+[m[32m      { chat_id: chatId, text }[m
+[32m+[m[32m    );[m
+[32m+[m[32m  } catch (e) {[m
+[32m+[m[32m    console.error(e.response?.data || e.message);[m
+   }[m
+ }[m
+ [m
+[31m-/* ==============================[m
+[31m-   CREATE OR RENEW[m
+[31m-============================== */[m
+[31m-async function createOrRenewSubscription({ user_id, username, days, amount, method }) {[m
+[31m-[m
+[31m-  const client = await pool.connect();[m
+[32m+[m[32masync function removeFromGroup(userId) {[m
+[32m+[m[32m  if (!GROUP_ID) {[m
+[32m+[m[32m    console.log("GROUP_ID missing");[m
+[32m+[m[32m    return;[m
+[32m+[m[32m  }[m
+ [m
+   try {[m
+[31m-    await client.query("BEGIN");[m
+[31m-[m
+[31m-    await client.query(`[m
+[31m-      UPDATE subscriptions[m
+[31m-      SET status='expired'[m
+[31m-      WHERE user_id=$1 AND status='active'[m
+[31m-    `, [user_id]);[m
+[31m-[m
+[31m-    const startDate = new Date();[m
+[31m-    const endDate = new Date();[m
+[31m-    endDate.setDate(endDate.getDate() + days);[m
+[31m-[m
+[31m-    await client.query(`[m
+[31m-      INSERT INTO subscriptions [m
+[31m-      (user_id, username, start_date, end_date, status, days, amount, method)[m
+[31m-      VALUES ($1,$2,$3,$4,'active',$5,$6,$7)[m
+[31m-    `, [[m
+[31m-      user_id,[m
+[31m-      username,[m
+[31m-      startDate,[m
+[31m-      endDate,[m
+[31m-      days,[m
+[31m-      amount,[m
+[31m-      method[m
+[31m-    ]);[m
+[31m-[m
+[31m-    await client.query("COMMIT");[m
+[31m-[m
+[31m-    // 🔥 Notificar al usuario por Telegram[m
+[31m-    try {[m
+[31m-      await bot.sendMessage(user_id, `✅ Subscription activated for ${days} days.`);[m
+[31m-    } catch (e) {[m
+[31m-      console.log("No se pudo notificar al usuario");[m
+[31m-    }[m
+[31m-[m
+[31m-  } catch (err) {[m
+[31m-    await client.query("ROLLBACK");[m
+[31m-    throw err;[m
+[31m-  } finally {[m
+[31m-    client.release();[m
+[32m+[m[32m    await axios.post([m
+[32m+[m[32m      `https://api.telegram.org/bot${BOT_TOKEN}/banChatMember`,[m
+[32m+[m[32m      {[m
+[32m+[m[32m        chat_id: GROUP_ID,[m
+[32m+[m[32m        user_id: userId[m
+[32m+[m[32m      }[m
+[32m+[m[32m    );[m
+[32m+[m[32m  } catch (e) {[m
+[32m+[m[32m    console.error("Remove error", e.response?.data || e.message);[m
+   }[m
+ }[m
+ [m
+[31m-/* ==============================[m
+[31m-   WEBHOOK[m
+[31m-============================== */[m
+[31m-app.post("/webhook", async (req, res) => {[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mADMIN SESSION (estado del flujo guiado)[m
+[32m+[m[32m====================== */[m
+[32m+[m[32m// Memoria simple para el flujo del admin (en prod usar Redis o tabla)[m
+[32m+[m[32mlet adminSession = null;[m
+[32m+[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mREGISTER USER[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32masync function registerUser(user) {[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    INSERT INTO users(telegram_id, username, first_name)[m
+[32m+[m[32m    VALUES($1, $2, $3)[m
+[32m+[m[32m    ON CONFLICT(telegram_id) DO NOTHING[m
+[32m+[m[32m  `, [user.id, user.username || null, user.first_name || null]);[m
+[32m+[m[32m}[m
+ [m
+[31m-  const telegramSecret = req.headers["x-telegram-bot-api-secret-token"];[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mRENEW SUBSCRIPTION - MEJORADO[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32masync function renewUser(telegramId, days, amount, paymentMethod, isRenewal) {[m
+[32m+[m[32m  const userRes = await pool.query([m
+[32m+[m[32m    `SELECT id FROM users WHERE telegram_id=$1`,[m
+[32m+[m[32m    [telegramId][m
+[32m+[m[32m  );[m
+[32m+[m
+[32m+[m[32m  if (!userRes.rowCount) return "❌ Usuario no encontrado";[m
+[32m+[m
+[32m+[m[32m  const userId = userRes.rows[0].id;[m
+[32m+[m
+[32m+[m[32m  // Cerrar suscripciones activas previas[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    UPDATE subscriptions[m
+[32m+[m[32m    SET status='expired'[m
+[32m+[m[32m    WHERE user_id=$1 AND status='active'[m
+[32m+[m[32m  `, [userId]);[m
+[32m+[m
+[32m+[m[32m  // Crear nueva suscripción[m
+[32m+[m[32m  const sub = await pool.query(`[m
+[32m+[m[32m    INSERT INTO subscriptions(user_id, start_date, end_date, status, is_renewal)[m
+[32m+[m[32m    VALUES($1, CURRENT_DATE, CURRENT_DATE + $2 * INTERVAL '1 day', 'active', $3)[m
+[32m+[m[32m    RETURNING id, end_date[m
+[32m+[m[32m  `, [userId, days, isRenewal]);[m
+[32m+[m
+[32m+[m[32m  const subId = sub.rows[0].id;[m
+[32m+[m[32m  const endDate = sub.rows[0].end_date;[m
+[32m+[m
+[32m+[m[32m  // Registrar pago con método[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    INSERT INTO payments(subscription_id, amount, payment_method)[m
+[32m+[m[32m    VALUES($1, $2, $3)[m
+[32m+[m[32m  `, [subId, amount, paymentMethod]);[m
+[32m+[m
+[32m+[m[32m  // Actualizar estado usuario[m
+[32m+[m[32m  await pool.query(`[m
+[32m+[m[32m    UPDATE users[m
+[32m+[m[32m    SET subscription_status='active', subscription_end=$1[m
+[32m+[m[32m    WHERE id=$2[m
+[32m+[m[32m  `, [endDate, userId]);[m
+[32m+[m
+[32m+[m[32m  return `✅ Suscripción registrada.\nVence: ${endDate}\nTipo: ${isRenewal ? 'Renovación' : 'Alta nueva'}`;[m
+[32m+[m[32m}[m
+ [m
+[31m-  if (telegramSecret !== SECRET_TOKEN) {[m
+[31m-    return res.sendStatus(403);[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mBUSINESS STATS - AVANZADO[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32masync function stats() {[m
+[32m+[m[32m  const active = await pool.query(`[m
+[32m+[m[32m    SELECT COUNT(*) FROM users[m
+[32m+[m[32m    WHERE subscription_status='active'[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  const monthStart = new Date();[m
+[32m+[m[32m  monthStart.setDate(1);[m
+[32m+[m
+[32m+[m[32m  const mrr = await pool.query(`[m
+[32m+[m[32m    SELECT COALESCE(SUM(amount), 0) total[m
+[32m+[m[32m    FROM payments[m
+[32m+[m[32m    WHERE paid_at >= $1::timestamp[m
+[32m+[m[32m  `, [monthStart]);[m
+[32m+[m
+[32m+[m[32m  const totalRevenue = await pool.query(`[m
+[32m+[m[32m    SELECT COALESCE(SUM(amount), 0) total FROM payments[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  const avgTicket = await pool.query(`[m
+[32m+[m[32m    SELECT COALESCE(AVG(amount), 0) avg FROM payments[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  const newSubs = await pool.query(`[m
+[32m+[m[32m    SELECT COUNT(*)[m[41m [m
+[32m+[m[32m    FROM subscriptions s[m
+[32m+[m[32m    JOIN payments p ON s.id = p.subscription_id[m
+[32m+[m[32m    WHERE s.is_renewal = FALSE AND p.paid_at >= $1::timestamp[m
+[32m+[m[32m  `, [monthStart]);[m
+[32m+[m
+[32m+[m[32m  const renewals = await pool.query(`[m
+[32m+[m[32m    SELECT COUNT(*)[m[41m [m
+[32m+[m[32m    FROM subscriptions s[m
+[32m+[m[32m    JOIN payments p ON s.id = p.subscription_id[m
+[32m+[m[32m    WHERE s.is_renewal = TRUE AND p.paid_at >= $1::timestamp[m
+[32m+[m[32m  `, [monthStart]);[m
+[32m+[m
+[32m+[m[32m  const arpu = newSubs.rowCount > 0[m[41m [m
+[32m+[m[32m    ? Number(mrr.rows[0].total / newSubs.rows[0].count).toFixed(2)[m
+[32m+[m[32m    : 0;[m
+[32m+[m
+[32m+[m[32m  return `[m
+[32m+[m[32m📊 STATS MES ACTUAL[m
+[32m+[m[32mActive users: ${active.rows[0].count}[m
+[32m+[m[32mIngresos mes: $${Number(mrr.rows[0].total).toFixed(2)}[m
+[32m+[m[32mIngresos total: $${Number(totalRevenue.rows[0].total).toFixed(2)}[m
+[32m+[m[32mAltas nuevas: ${newSubs.rows[0].count}[m
+[32m+[m[32mRenovaciones: ${renewals.rows[0].count}[m
+[32m+[m[32mTicket promedio: $${Number(avgTicket.rows[0].avg).toFixed(2)}[m
+[32m+[m[32mARPU: $${arpu}[m
+[32m+[m[32m  `;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mMONTHLY REPORT[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32masync function monthlyReport(year, month) {[m
+[32m+[m[32m  const dateStart = `${year}-${String(month).padStart(2, '0')}-01`;[m
+[32m+[m[32m  const dateEnd = new Date(year, month, 0);[m
+[32m+[m
+[32m+[m[32m  const revenue = await pool.query(`[m
+[32m+[m[32m    SELECT COALESCE(SUM(amount), 0) total[m
+[32m+[m[32m    FROM payments WHERE paid_at >= $1::date AND paid_at < $2::date[m
+[32m+[m[32m  `, [dateStart, dateEnd.toISOString().split('T')[0]]);[m
+[32m+[m
+[32m+[m[32m  const newSubs = await pool.query(`[m
+[32m+[m[32m    SELECT COUNT(*) FROM subscriptions s[m
+[32m+[m[32m    JOIN payments p ON s.id = p.subscription_id[m
+[32m+[m[32m    WHERE s.is_renewal = FALSE AND p.paid_at >= $1::date AND p.paid_at < $2::date[m
+[32m+[m[32m  `, [dateStart, dateEnd.toISOString().split('T')[0]]);[m
+[32m+[m
+[32m+[m[32m  const renewals = await pool.query(`[m
+[32m+[m[32m    SELECT COUNT(*) FROM subscriptions s[m
+[32m+[m[32m    JOIN payments p ON s.id = p.subscription_id[m
+[32m+[m[32m    WHERE s.is_renewal = TRUE AND p.paid_at >= $1::date AND p.paid_at < $2::date[m
+[32m+[m[32m  `, [dateStart, dateEnd.toISOString().split('T')[0]]);[m
+[32m+[m
+[32m+[m[32m  // Comparación con mes anterior[m
+[32m+[m[32m  const prevMonth = month === 1 ? 12 : month - 1;[m
+[32m+[m[32m  const prevYear = month === 1 ? year - 1 : year;[m
+[32m+[m[32m  const prevStart = `${prevYear}-${String(prevMonth).padStart(2, '0')}-01`;[m
+[32m+[m[32m  const prevEnd = new Date(prevYear, prevMonth, 0);[m
+[32m+[m
+[32m+[m[32m  const prevRevenue = await pool.query(`[m
+[32m+[m[32m    SELECT COALESCE(SUM(amount), 0) total[m
+[32m+[m[32m    FROM payments WHERE paid_at >= $1::date AND paid_at < $2::date[m
+[32m+[m[32m  `, [prevStart, prevEnd.toISOString().split('T')[0]]);[m
+[32m+[m
+[32m+[m[32m  const growth = prevRevenue.rows[0].total > 0[m[41m [m
+[32m+[m[32m    ? ((revenue.rows[0].total - prevRevenue.rows[0].total) / prevRevenue.rows[0].total * 100).toFixed(1)[m
+[32m+[m[32m    : '∞';[m
+[32m+[m
+[32m+[m[32m  return `[m
+[32m+[m[32m📈 REPORTE MES ${year}-${String(month).padStart(2, '0')}[m
+[32m+[m[32mIngresos: $${Number(revenue.rows[0].total).toFixed(2)}[m
+[32m+[m[32mAltas nuevas: ${newSubs.rows[0].count}[m
+[32m+[m[32mRenovaciones: ${renewals.rows[0].count}[m
+[32m+[m[32mCrecimiento vs mes anterior: ${growth}%[m
+[32m+[m[32m  `;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mDAILY CHECK - MEJORADO[m
+[32m+[m[32m====================== */[m
+[32m+[m
+[32m+[m[32mcron.schedule("0 9 * * *", async () => {[m
+[32m+[m[32m  console.log("Daily subscription check");[m
+[32m+[m
+[32m+[m[32m  // Vencen hoy[m
+[32m+[m[32m  const expiring = await pool.query(`[m
+[32m+[m[32m    SELECT telegram_id, username[m
+[32m+[m[32m    FROM users[m
+[32m+[m[32m    WHERE subscription_status='active'[m
+[32m+[m[32m    AND subscription_end = CURRENT_DATE[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  for (const u of expiring.rows) {[m
+[32m+[m[32m    await sendMessage([m
+[32m+[m[32m      ADMIN_ID,[m
+[32m+[m[32m      `⚠️ Vence hoy: ${u.username || u.telegram_id}`[m
+[32m+[m[32m    );[m
+   }[m
+ [m
+[31m-  try {[m
+[31m-    await bot.processUpdate(req.body);[m
+[31m-    res.sendStatus(200);[m
+[31m-  } catch (err) {[m
+[31m-    console.error("Webhook error:", err);[m
+[31m-    res.sendStatus(500);[m
+[32m+[m[32m  // Remover tras 3 días[m
+[32m+[m[32m  const expired = await pool.query(`[m
+[32m+[m[32m    SELECT telegram_id, id, username[m
+[32m+[m[32m    FROM users[m
+[32m+[m[32m    WHERE subscription_status='active'[m
+[32m+[m[32m    AND subscription_end <= CURRENT_DATE - INTERVAL '3 days'[m
+[32m+[m[32m  `);[m
+[32m+[m
+[32m+[m[32m  for (const u of expired.rows) {[m
+[32m+[m[32m    await removeFromGroup(u.telegram_id);[m
+[32m+[m
+[32m+[m[32m    await pool.query(`[m
+[32m+[m[32m      UPDATE users[m
+[32m+[m[32m      SET subscription_status='inactive'[m
+[32m+[m[32m      WHERE id=$1[m
+[32m+[m[32m    `, [u.id]);[m
+[32m+[m
+[32m+[m[32m    await sendMessage([m
+[32m+[m[32m      ADMIN_ID,[m
+[32m+[m[32m      `❌ Removido por no renovar: ${u.username || u.telegram_id}`[m
+[32m+[m[32m    );[m
+   }[m
+ });[m
+ [m
+[31m-/* ==============================[m
+[31m-   TELEGRAM COMMANDS[m
+[31m-============================== */[m
+[31m-bot.onText(/\/start/, async (msg) => {[m
+[31m-  await bot.sendMessage(msg.chat.id, "Bot active ✅");[m
+[31m-});[m
+[32m+[m[32m/* ======================[m
+[32m+[m[32mWEBHOOK - CON FLUJO GUIADO[m
+[32m+[m[32m====================== */[m
+ [m
+[31m-/* ==============================[m
+[31m-   ROUTES (SE MANTIENEN IGUAL)[m
+[31m-============================== */[m
+[31m-app.post("/renew", async (req, res) => {[m
+[31m-  try {[m
+[31m-    const { user_id, username, days, amount, method } = req.body;[m
+[32m+[m[32mapp.post("/webhook", async (req, res) => {[m
+[32m+[m[32m  const incomingSecret = req.headers["x-telegram-bot-api-secret-token"];[m
+[32m+[m
+[32m+[m[32m  if (incomingSecret !== SECRET_TOKEN)[m
+[32m+[m[32m    return res.sendStatus(403);[m
+[32m+[m
+[32m+[m[32m  const update = req.body;[m
+[32m+[m
+[32m+[m[32m  console.log("Webhook received:", JSON.stringify(update));[m
+ [m
+[31m-    if (!user_id || !days || !amount || !method) {[m
+[31m-      return res.status(400).json({[m
+[31m-        error: "user_id, days, amount y method son obligatorios"[m
+[31m-      });[m
+[32m+[m[32m  // USER JOIN GROUP[m
+[32m+[m[32m  if (update.message?.new_chat_members) {[m
+[32m+[m[32m    const chatId = update.message.chat.id;[m
+[32m+[m
+[32m+[m[32m    if (!GROUP_ID) {[m
+[32m+[m[32m      GROUP_ID = chatId;[m
+[32m+[m[32m      console.log("GROUP DETECTED:", GROUP_ID);[m
+[32m+[m[32m      await sendMessage([m
+[32m+[m[32m        ADMIN_ID,[m
+[32m+[m[32m        `✅ Grupo detectado automáticamente: ${GROUP_ID}`[m
+[32m+[m[32m      );[m
+     }[m
+ [m
+[31m-    await createOrRenewSubscription({[m
+[31m-      user_id,[m
+[31m-      username,[m
+[31m-      days: Number(days),[m
+[31m-      amount: Number(amount),[m
+[31m-      method[m

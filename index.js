@@ -26,9 +26,9 @@ pool.connect()
   .catch(console.error);
 
 function isoToDisplay(iso) {
-  if (!iso || typeof iso !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return String(iso);
-  const [y, m, d] = iso.split('-');
-  const months = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+  if (!iso || typeof iso !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return String(iso);
+  const [y, m, d] = iso.split("-");
+  const months = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
   const mm = Number(m);
   return `${Number(d)} ${months[mm - 1] || m} ${y}`;
 }
@@ -84,7 +84,7 @@ async function sendMessage(chatId, text) {
       { chat_id: chatId, text }
     );
   } catch (e) {
-    console.error('SendMessage error:', e.response?.data || e.message);
+    console.error("SendMessage error:", e.response?.data || e.message);
   }
 }
 
@@ -100,6 +100,7 @@ async function removeFromGroup(userId) {
   }
 }
 
+// Sesión del admin para altas/renovaciones
 let adminSession = null;
 
 async function registerUser(user) {
@@ -120,20 +121,20 @@ async function renewUser(telegramId, days, amount, paymentMethod) {
 
   const userId = userRes.rows[0].id;
 
-  // Close previous active subscriptions for this user
+  // Cerrar suscripciones activas previas
   await pool.query(`
     UPDATE subscriptions SET status='expired'
     WHERE user_id=$1 AND status='active'
   `, [userId]);
 
-  // Determine renewal
+  // ¿Es renovación?
   const prevSubs = await pool.query(
     `SELECT 1 FROM subscriptions WHERE user_id=$1 LIMIT 1`,
     [userId]
   );
   const isRenewal = prevSubs.rowCount > 0;
 
-  // IMPORTANT: Return end_date as ISO string and store DATE in DB (no locale strings)
+  // Insertar nueva suscripción
   const sub = await pool.query(`
     INSERT INTO subscriptions(user_id, start_date, end_date, status, is_renewal)
     VALUES($1, CURRENT_DATE, (CURRENT_DATE + $2 * INTERVAL '1 day')::date, 'active', $3)
@@ -146,7 +147,7 @@ async function renewUser(telegramId, days, amount, paymentMethod) {
   await pool.query(`
     INSERT INTO payments(subscription_id, amount, method)
     VALUES($1, $2, $3)
-  `, [subId, amount, paymentMethod || 'manual']);
+  `, [subId, amount, paymentMethod || "manual"]);
 
   await pool.query(`
     UPDATE users
@@ -154,12 +155,16 @@ async function renewUser(telegramId, days, amount, paymentMethod) {
     WHERE id=$2
   `, [endDateIso, userId]);
 
-  return `✅ Suscripción registrada!\nVence: ${isoToDisplay(endDateIso)} (${endDateIso})\nTipo: ${isRenewal ? '🔄 Renovación' : '➕ Alta nueva'}\nMonto: $${amount} (${paymentMethod})`;
+  return `✅ Suscripción registrada!\nVence: ${isoToDisplay(endDateIso)} (${endDateIso})\nTipo: ${
+    isRenewal ? "🔄 Renovación" : "➕ Alta nueva"
+  }\nMonto: $${amount} (${paymentMethod})`;
 }
 
 async function stats() {
   try {
-    const active = await pool.query(`SELECT COUNT(*) FROM users WHERE subscription_status='active'`);
+    const active = await pool.query(
+      `SELECT COUNT(*) FROM users WHERE subscription_status='active'`
+    );
 
     const monthStart = new Date();
     monthStart.setDate(1);
@@ -168,8 +173,12 @@ async function stats() {
       `SELECT COALESCE(SUM(amount), 0) total FROM payments WHERE paid_at >= $1::timestamp`,
       [monthStart]
     );
-    const totalRevenue = await pool.query(`SELECT COALESCE(SUM(amount), 0) total FROM payments`);
-    const avgTicket = await pool.query(`SELECT COALESCE(AVG(amount), 0) avg FROM payments`);
+    const totalRevenue = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) total FROM payments`
+    );
+    const avgTicket = await pool.query(
+      `SELECT COALESCE(AVG(amount), 0) avg FROM payments`
+    );
 
     const newSubs = await pool.query(`
       SELECT COUNT(*) FROM subscriptions s
@@ -185,12 +194,20 @@ async function stats() {
 
     const arpu = Number(newSubs.rows[0].count) > 0
       ? (Number(mrr.rows[0].total) / Number(newSubs.rows[0].count)).toFixed(2)
-      : '0.00';
+      : "0.00";
 
-    return `\n📊 STATS MES ACTUAL\n👥 Usuarios activos: ${active.rows[0].count}\n💰 Ingresos mes: $${Number(mrr.rows[0].total).toFixed(2)}\n💎 Ingresos total: $${Number(totalRevenue.rows[0].total).toFixed(2)}\n➕ Altas nuevas: ${newSubs.rows[0].count}\n🔄 Renovaciones: ${renewals.rows[0].count}\n📈 Ticket promedio: $${Number(avgTicket.rows[0].avg).toFixed(2)}\n🎯 ARPU: $${arpu}`;
+    return `
+📊 STATS MES ACTUAL
+👥 Usuarios activos: ${active.rows[0].count}
+💰 Ingresos mes: $${Number(mrr.rows[0].total).toFixed(2)}
+💎 Ingresos total: $${Number(totalRevenue.rows[0].total).toFixed(2)}
+➕ Altas nuevas: ${newSubs.rows[0].count}
+🔄 Renovaciones: ${renewals.rows[0].count}
+📈 Ticket promedio: $${Number(avgTicket.rows[0].avg).toFixed(2)}
+🎯 ARPU: $${arpu}`;
   } catch (e) {
-    console.error('Stats error:', e);
-    return '❌ Error calculando stats';
+    console.error("Stats error:", e);
+    return "❌ Error calculando stats";
   }
 }
 
@@ -203,27 +220,41 @@ async function monthReport(year, month) {
   const end = new Date(Date.UTC(y, m, 1, 0, 0, 0));
 
   const revenue = await pool.query(
-    `SELECT COALESCE(SUM(amount),0) total\n     FROM payments\n     WHERE paid_at >= $1::timestamptz AND paid_at < $2::timestamptz`,
+    `SELECT COALESCE(SUM(amount),0) total
+     FROM payments
+     WHERE paid_at >= $1::timestamptz AND paid_at < $2::timestamptz`,
     [start.toISOString(), end.toISOString()]
   );
 
   const newSubs = await pool.query(
-    `SELECT COUNT(*)\n     FROM subscriptions s\n     JOIN payments p ON p.subscription_id = s.id\n     WHERE s.is_renewal = FALSE\n       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
+    `SELECT COUNT(*)
+     FROM subscriptions s
+     JOIN payments p ON p.subscription_id = s.id
+     WHERE s.is_renewal = FALSE
+       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
     [start.toISOString(), end.toISOString()]
   );
 
   const renewals = await pool.query(
-    `SELECT COUNT(*)\n     FROM subscriptions s\n     JOIN payments p ON p.subscription_id = s.id\n     WHERE s.is_renewal = TRUE\n       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
+    `SELECT COUNT(*)
+     FROM subscriptions s
+     JOIN payments p ON p.subscription_id = s.id
+     WHERE s.is_renewal = TRUE
+       AND p.paid_at >= $1::timestamptz AND p.paid_at < $2::timestamptz`,
     [start.toISOString(), end.toISOString()]
   );
 
-  return `📅 REPORTE ${y}-${String(m).padStart(2,"0")}\nIngresos: $${Number(revenue.rows[0].total).toFixed(2)}\nAltas nuevas: ${newSubs.rows[0].count}\nRenovaciones: ${renewals.rows[0].count}`;
+  return `📅 REPORTE ${y}-${String(m).padStart(2,"0")}
+Ingresos: $${Number(revenue.rows[0].total).toFixed(2)}
+Altas nuevas: ${newSubs.rows[0].count}
+Renovaciones: ${renewals.rows[0].count}`;
 }
 
+// CRON diario
 cron.schedule("0 9 * * *", async () => {
   console.log("Daily check");
 
-  // Notify expiring today
+  // Notificar vencen hoy
   const expiring = await pool.query(`
     SELECT telegram_id, username
     FROM users
@@ -235,11 +266,13 @@ cron.schedule("0 9 * * *", async () => {
   for (const u of expiring.rows) {
     await sendMessage(
       ADMIN_ID,
-      `⚠️ Vence hoy:\nUsername: ${u.username || 'sin username'}\nTelegram ID: ${u.telegram_id}`
+      `⚠️ Vence hoy:
+Username: ${u.username || "sin username"}
+Telegram ID: ${u.telegram_id}`
     );
   }
 
-  // Auto-remove after 3 days past end date
+  // Auto-remove 3 días después de vencimiento
   const expired = await pool.query(`
     SELECT telegram_id, id, username, subscription_end
     FROM users
@@ -251,7 +284,9 @@ cron.schedule("0 9 * * *", async () => {
   if (expired.rowCount > MAX_AUTOREMOVE_PER_RUN) {
     await sendMessage(
       ADMIN_ID,
-      `🚨 Seguridad: ${expired.rowCount} usuarios cumplen condición de expulsión.\nNo se ejecutó auto-expulsión.\nRevisa users.subscription_end.`
+      `🚨 Seguridad: ${expired.rowCount} usuarios cumplen condición de expulsión.
+No se ejecutó auto-expulsión.
+Revisa users.subscription_end.`
     );
     return;
   }
@@ -261,11 +296,15 @@ cron.schedule("0 9 * * *", async () => {
     await pool.query(`UPDATE users SET subscription_status='inactive' WHERE id=$1`, [u.id]);
     await sendMessage(
       ADMIN_ID,
-      `❌ Removido por no renovar:\nUsername: ${u.username || 'sin username'}\nTelegram ID: ${u.telegram_id}\nVenció: ${u.subscription_end}`
+      `❌ Removido por no renovar:
+Username: ${u.username || "sin username"}
+Telegram ID: ${u.telegram_id}
+Venció: ${u.subscription_end}`
     );
   }
 });
 
+// WEBHOOK
 app.post("/webhook", async (req, res) => {
   const incomingSecret = req.headers["x-telegram-bot-api-secret-token"];
   if (incomingSecret !== SECRET_TOKEN) return res.sendStatus(403);
@@ -273,8 +312,10 @@ app.post("/webhook", async (req, res) => {
   const update = req.body;
   console.log("Webhook received:", JSON.stringify(update));
 
+  // 1) Nuevos miembros del grupo
   if (update.message?.new_chat_members) {
     const chatId = update.message.chat.id;
+
     if (!GROUP_ID) {
       GROUP_ID = chatId;
       console.log("GROUP_ID:", GROUP_ID);
@@ -283,24 +324,53 @@ app.post("/webhook", async (req, res) => {
 
     for (const member of update.message.new_chat_members) {
       if (member.is_bot) continue;
+
       await registerUser(member);
+
+      // Notificación estándar
       await sendMessage(
         ADMIN_ID,
-        `👤 Usuario entró:\nUsername: ${member.username || 'sin username'}\nTelegram ID: ${member.id}`
+        `👤 Usuario entró:
+Username: ${member.username || "sin username"}
+Telegram ID: ${member.id}`
       );
+
+      // Iniciar flujo automático si no hay sesión activa
+      if (!adminSession) {
+        adminSession = {
+          step: "days",
+          telegramId: String(member.id),
+          chatId: ADMIN_ID
+        };
+
+        await sendMessage(
+          ADMIN_ID,
+          `🚀 Nuevo miembro detectado: ${member.username || "sin username"} (${member.id})
+
+¿Cuántos días contrató?`
+        );
+      } else {
+        await sendMessage(
+          ADMIN_ID,
+          `ℹ️ Entró ${member.username || "sin username"} (${member.id}) pero ya hay una renovación en curso.
+Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
+        );
+      }
     }
 
     return res.sendStatus(200);
   }
 
+  // Si no hay message, nada que hacer
   if (!update.message) return res.sendStatus(200);
   const msg = update.message;
-
-  if (msg.from.id !== ADMIN_ID) return res.sendStatus(200);
-
   const text = (msg.text || "").trim();
   const chatId = msg.chat.id;
 
+  // Solo el admin puede ejecutar comandos
+  if (msg.from.id !== ADMIN_ID) return res.sendStatus(200);
+
+  // 2) /month YYYY MM
   if (text.startsWith("/month ")) {
     const parts = text.split(" ");
     const year = parts[1];
@@ -310,12 +380,14 @@ app.post("/webhook", async (req, res) => {
     return res.sendStatus(200);
   }
 
+  // 3) /stats
   if (text === "/stats") {
     const s = await stats();
     await sendMessage(chatId, s);
     return res.sendStatus(200);
   }
 
+  // 4) /renew TELEGRAM_ID (flujo manual)
   if (text.startsWith("/renew ")) {
     const telegramId = text.split(" ")[1];
     if (!telegramId || isNaN(telegramId)) {
@@ -323,38 +395,47 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    adminSession = { step: 'days', telegramId, chatId };
-    await sendMessage(chatId, `👤 Renovar/Alta: ${telegramId}\n\n¿Cuántos días contrató?`);
+    adminSession = { step: "days", telegramId, chatId };
+    await sendMessage(
+      chatId,
+      `👤 Renovar/Alta: ${telegramId}\n\n¿Cuántos días contrató?`
+    );
     return res.sendStatus(200);
   }
 
+  // 5) Flujo interactivo de adminSession
   if (adminSession && adminSession.chatId === chatId) {
     const response = text;
 
-    if (adminSession.step === 'days') {
+    if (adminSession.step === "days") {
       const days = parseInt(response);
       if (isNaN(days) || days <= 0) {
         await sendMessage(chatId, "❌ Días inválido (número > 0)");
         return res.sendStatus(200);
       }
       adminSession.days = days;
-      adminSession.step = 'amount';
+      adminSession.step = "amount";
       await sendMessage(chatId, "¿Cuánto pagó?");
       return res.sendStatus(200);
 
-    } else if (adminSession.step === 'amount') {
+    } else if (adminSession.step === "amount") {
       const amount = parseFloat(response);
       if (isNaN(amount) || amount <= 0) {
         await sendMessage(chatId, "❌ Monto inválido (número > 0)");
         return res.sendStatus(200);
       }
       adminSession.amount = amount;
-      adminSession.step = 'method';
+      adminSession.step = "method";
       await sendMessage(chatId, "¿Método? (transferencia, nequi, etc)");
       return res.sendStatus(200);
 
-    } else if (adminSession.step === 'method') {
-      const result = await renewUser(adminSession.telegramId, adminSession.days, adminSession.amount, response);
+    } else if (adminSession.step === "method") {
+      const result = await renewUser(
+        adminSession.telegramId,
+        adminSession.days,
+        adminSession.amount,
+        response
+      );
       await sendMessage(chatId, result);
       adminSession = null;
       return res.sendStatus(200);
@@ -364,7 +445,9 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-app.get("/", (_, res) => res.send("Subscription Bot - FIXED DATE STORAGE + GUARD ✅"));
+app.get("/", (_, res) =>
+  res.send("Subscription Bot - FIXED DATE STORAGE + GUARD ✅")
+);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server on port ${PORT}`));
