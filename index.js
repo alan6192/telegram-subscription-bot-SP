@@ -100,8 +100,9 @@ async function removeFromGroup(userId) {
   }
 }
 
-// Sesión del admin para altas/renovaciones
-let adminSession = null;
+// Sesiones
+let adminSession = null;      // altas / renovaciones
+let cleanupSession = null;    // proceso de expulsión manual
 
 async function registerUser(user) {
   await pool.query(`
@@ -311,6 +312,19 @@ async function nextExpiring(limit = 10, daysAhead = null) {
   return header + lines.join("\n\n");
 }
 
+// Obtener lista de usuarios con más de 3 días vencidos
+async function getExpiredCandidates() {
+  const res = await pool.query(`
+    SELECT id, telegram_id, username, subscription_end
+    FROM users
+    WHERE subscription_status='active'
+      AND subscription_end IS NOT NULL
+      AND subscription_end <= (CURRENT_DATE - INTERVAL '3 days')
+    ORDER BY subscription_end ASC
+  `);
+  return res.rows;
+}
+
 // Cron diario
 cron.schedule("0 9 * * *", async () => {
   console.log("Daily check");
@@ -346,19 +360,13 @@ Telegram ID: ${u.telegram_id}`
     console.error("Error en nextExpiring dentro del cron:", e);
   }
 
-  // Proponer expulsión después de 3 días sin renovar (sin ejecutar nada)
-  const expired = await pool.query(`
-    SELECT telegram_id, id, username, subscription_end
-    FROM users
-    WHERE subscription_status='active'
-      AND subscription_end IS NOT NULL
-      AND subscription_end <= (CURRENT_DATE - INTERVAL '3 days')
-  `);
+  // Solo informar quiénes llevan más de 3 días vencidos (sin expulsar)
+  const expired = await getExpiredCandidates();
 
-  if (expired.rowCount > 0) {
-    let resumen = `⚠️ Usuarios con más de 3 días vencidos (${expired.rowCount}):\n\n`;
+  if (expired.length > 0) {
+    let resumen = `⚠️ Usuarios con más de 3 días vencidos (${expired.length}):\n\n`;
 
-    const lines = expired.rows.slice(0, 20).map((u, i) => {
+    const lines = expired.slice(0, 20).map((u, i) => {
       const idx = i + 1;
       return `${idx}) ${u.username || "sin username"} — ${u.telegram_id}
    Venció: ${u.subscription_end}`;
@@ -366,11 +374,11 @@ Telegram ID: ${u.telegram_id}`
 
     resumen += lines.join("\n\n");
 
-    if (expired.rowCount > 20) {
-      resumen += `\n\n... y ${expired.rowCount - 20} más.`;
+    if (expired.length > 20) {
+      resumen += `\n\n... y ${expired.length - 20} más.`;
     }
 
-    resumen += `\n\nNo se ha expulsado a nadie automáticamente.\nSi quieres removerlos, hazlo manualmente o añadimos un comando /cleanup más adelante.`;
+    resumen += `\n\nNo se ha expulsado a nadie automáticamente.\nPuedes usar /cleanup para revisar y expulsar uno por uno.`;
 
     await sendMessage(ADMIN_ID, resumen);
   }
@@ -406,7 +414,6 @@ Username: ${member.username || "sin username"}
 Telegram ID: ${member.id}`
       );
 
-      // Iniciar flujo automático si no hay sesión activa
       if (!adminSession) {
         adminSession = {
           step: "days",
@@ -437,7 +444,7 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
   const text = (msg.text || "").trim();
   const chatId = msg.chat.id;
 
-  // Solo el admin puede ejecutar comandos
+  // Solo el admin puede ejecutar comandos / respuestas
   if (msg.from.id !== ADMIN_ID) return res.sendStatus(200);
 
   // /help - resumen de funcionalidad
@@ -460,6 +467,9 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
    Ej: /next        → próximos 10
        /next 5      → próximos 5
        /next 10 7   → 10 usuarios que vencen en los próximos 7 días.
+
+/cleanup
+   Inicia un flujo para revisar usuarios con más de 3 días vencidos y expulsarlos uno por uno (con confirmación).
 
 Además:
 - Cuando un usuario entra al grupo, el bot te abre automáticamente un flujo de alta/renovación (días, monto, método).
@@ -512,6 +522,38 @@ Además:
     return res.sendStatus(200);
   }
 
+  // /cleanup - iniciar flujo de expulsión uno a uno
+  if (text === "/cleanup") {
+    const candidates = await getExpiredCandidates();
+
+    if (!candidates.length) {
+      await sendMessage(chatId, "✅ No hay usuarios con más de 3 días vencidos.");
+      return res.sendStatus(200);
+    }
+
+    cleanupSession = {
+      chatId,
+      index: 0,
+      users: candidates
+    };
+
+    const u = candidates[0];
+    await sendMessage(
+      chatId,
+      `🧹 Limpieza de usuarios vencidos (uno por uno)
+
+Usuario 1 de ${candidates.length}:
+Username: ${u.username || "sin username"}
+Telegram ID: ${u.telegram_id}
+Venció: ${u.subscription_end}
+
+¿Quieres expulsarlo del grupo y marcarlo como inactivo?
+Responde: sí / no / stop`
+    );
+
+    return res.sendStatus(200);
+  }
+
   // /renew TELEGRAM_ID
   if (text.startsWith("/renew ")) {
     const telegramId = text.split(" ")[1];
@@ -528,7 +570,70 @@ Además:
     return res.sendStatus(200);
   }
 
-  // Flujo interactivo de adminSession
+  // Flujo de cleanup (sí / no / stop)
+  if (cleanupSession && cleanupSession.chatId === chatId) {
+    const answer = text.toLowerCase();
+
+    const users = cleanupSession.users;
+    let idx = cleanupSession.index;
+
+    if (answer === "stop") {
+      await sendMessage(chatId, "🧹 Limpieza detenida. No se expulsará a más usuarios.");
+      cleanupSession = null;
+      return res.sendStatus(200);
+    }
+
+    const current = users[idx];
+
+    if (answer === "sí" || answer === "si") {
+      // expulsar
+      await removeFromGroup(current.telegram_id);
+      await pool.query(
+        `UPDATE users SET subscription_status='inactive' WHERE id=$1`,
+        [current.id]
+      );
+      await sendMessage(
+        chatId,
+        `❌ Usuario expulsado:
+Username: ${current.username || "sin username"}
+Telegram ID: ${current.telegram_id}`
+      );
+    } else if (answer === "no") {
+      await sendMessage(
+        chatId,
+        `✔️ Usuario conservado:
+Username: ${current.username || "sin username"}
+Telegram ID: ${current.telegram_id}`
+      );
+    } else {
+      await sendMessage(chatId, "Responde: sí / no / stop");
+      return res.sendStatus(200);
+    }
+
+    // pasar al siguiente
+    idx += 1;
+    if (idx >= users.length) {
+      await sendMessage(chatId, "🧹 Limpieza completada. No hay más usuarios vencidos en esta lista.");
+      cleanupSession = null;
+    } else {
+      cleanupSession.index = idx;
+      const nextUser = users[idx];
+      await sendMessage(
+        chatId,
+        `Usuario ${idx + 1} de ${users.length}:
+Username: ${nextUser.username || "sin username"}
+Telegram ID: ${nextUser.telegram_id}
+Venció: ${nextUser.subscription_end}
+
+¿Quieres expulsarlo del grupo y marcarlo como inactivo?
+Responde: sí / no / stop`
+      );
+    }
+
+    return res.sendStatus(200);
+  }
+
+  // Flujo interactivo de adminSession (alta / renovación)
   if (adminSession && adminSession.chatId === chatId) {
     const response = text;
 
