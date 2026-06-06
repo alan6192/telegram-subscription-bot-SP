@@ -226,6 +226,62 @@ async function monthReport(year, month) {
     [start.toISOString(), end.toISOString()]
   );
 
+async function nextExpiring(limit = 10, daysAhead = null) {
+  // Aseguramos enteros razonables
+  const lim = Math.min(Math.max(parseInt(limit) || 10, 1), 100);
+
+  let query = `
+    SELECT
+      telegram_id,
+      username,
+      subscription_end,
+      (subscription_end - CURRENT_DATE) AS days_left
+    FROM users
+    WHERE subscription_status = 'active'
+      AND subscription_end IS NOT NULL
+      AND subscription_end >= CURRENT_DATE
+  `;
+  const params = [];
+
+  // Si se pasa daysAhead, filtramos hasta esa fecha
+  if (daysAhead !== null) {
+    query += ` AND subscription_end <= (CURRENT_DATE + $1::interval)`;
+    params.push(`${daysAhead} days`);
+  }
+
+  query += `
+    ORDER BY subscription_end ASC
+    LIMIT ${lim}
+  `;
+
+  const res = await pool.query(query, params);
+
+  if (!res.rowCount) {
+    return "📅 No hay usuarios activos con fecha de vencimiento próxima.";
+  }
+
+  let header = "📅 Próximos usuarios en vencer\n\n";
+  if (daysAhead !== null) {
+    header = `📅 Próximos usuarios que vencen en los próximos ${daysAhead} días\n\n`;
+  }
+
+  const lines = res.rows.map((u, i) => {
+    const idx = i + 1;
+    const username = u.username || "sin username";
+    const endDate = isoToDisplay(u.subscription_end?.toISOString?.().slice(0,10) || String(u.subscription_end));
+    const daysLeft = Number(u.days_left);
+    const diasTexto = daysLeft === 0
+      ? "hoy"
+      : daysLeft === 1
+        ? "en 1 día"
+        : `en ${daysLeft} días`;
+
+    return `${idx}) ${endDate} (${diasTexto})\n   ${username} — ${u.telegram_id}`;
+  });
+
+  return header + lines.join("\n\n");
+}
+
   const newSubs = await pool.query(
     `SELECT COUNT(*)
      FROM subscriptions s
