@@ -226,62 +226,6 @@ async function monthReport(year, month) {
     [start.toISOString(), end.toISOString()]
   );
 
-async function nextExpiring(limit = 10, daysAhead = null) {
-  // Aseguramos enteros razonables
-  const lim = Math.min(Math.max(parseInt(limit) || 10, 1), 100);
-
-  let query = `
-    SELECT
-      telegram_id,
-      username,
-      subscription_end,
-      (subscription_end - CURRENT_DATE) AS days_left
-    FROM users
-    WHERE subscription_status = 'active'
-      AND subscription_end IS NOT NULL
-      AND subscription_end >= CURRENT_DATE
-  `;
-  const params = [];
-
-  // Si se pasa daysAhead, filtramos hasta esa fecha
-  if (daysAhead !== null) {
-    query += ` AND subscription_end <= (CURRENT_DATE + $1::interval)`;
-    params.push(`${daysAhead} days`);
-  }
-
-  query += `
-    ORDER BY subscription_end ASC
-    LIMIT ${lim}
-  `;
-
-  const res = await pool.query(query, params);
-
-  if (!res.rowCount) {
-    return "📅 No hay usuarios activos con fecha de vencimiento próxima.";
-  }
-
-  let header = "📅 Próximos usuarios en vencer\n\n";
-  if (daysAhead !== null) {
-    header = `📅 Próximos usuarios que vencen en los próximos ${daysAhead} días\n\n`;
-  }
-
-  const lines = res.rows.map((u, i) => {
-    const idx = i + 1;
-    const username = u.username || "sin username";
-    const endDate = isoToDisplay(u.subscription_end?.toISOString?.().slice(0,10) || String(u.subscription_end));
-    const daysLeft = Number(u.days_left);
-    const diasTexto = daysLeft === 0
-      ? "hoy"
-      : daysLeft === 1
-        ? "en 1 día"
-        : `en ${daysLeft} días`;
-
-    return `${idx}) ${endDate} (${diasTexto})\n   ${username} — ${u.telegram_id}`;
-  });
-
-  return header + lines.join("\n\n");
-}
-
   const newSubs = await pool.query(
     `SELECT COUNT(*)
      FROM subscriptions s
@@ -306,11 +250,72 @@ Altas nuevas: ${newSubs.rows[0].count}
 Renovaciones: ${renewals.rows[0].count}`;
 }
 
-// CRON diario
+// NUEVA función global: próximos en vencer
+async function nextExpiring(limit = 10, daysAhead = null) {
+  const lim = Math.min(Math.max(parseInt(limit) || 10, 1), 100);
+
+  let query = `
+    SELECT
+      telegram_id,
+      username,
+      subscription_end,
+      (subscription_end - CURRENT_DATE) AS days_left
+    FROM users
+    WHERE subscription_status = 'active'
+      AND subscription_end IS NOT NULL
+      AND subscription_end >= CURRENT_DATE
+  `;
+  const params = [];
+
+  if (daysAhead !== null) {
+    query += ` AND subscription_end <= (CURRENT_DATE + $1::interval)`;
+    params.push(`${daysAhead} days`);
+  }
+
+  query += `
+    ORDER BY subscription_end ASC
+    LIMIT ${lim}
+  `;
+
+  const res = await pool.query(query, params);
+
+  if (!res.rowCount) {
+    return "📅 No hay usuarios activos con fecha de vencimiento próxima.";
+  }
+
+  let header = "📅 Próximos usuarios en vencer\n\n";
+  if (daysAhead !== null) {
+    header = `📅 Próximos usuarios que vencen en los próximos ${daysAhead} días\n\n`;
+  }
+
+  const lines = res.rows.map((u, i) => {
+    const idx = i + 1;
+    const username = u.username || "sin username";
+    const endDateIso =
+      typeof u.subscription_end === "string"
+        ? u.subscription_end
+        : u.subscription_end.toISOString().slice(0, 10);
+    const endDate = isoToDisplay(endDateIso);
+    const daysLeft = Number(u.days_left);
+    const diasTexto =
+      daysLeft === 0
+        ? "hoy"
+        : daysLeft === 1
+        ? "en 1 día"
+        : `en ${daysLeft} días`;
+
+    return `${idx}) ${endDate} (${diasTexto})
+   ${username} — ${u.telegram_id}`;
+  });
+
+  return header + lines.join("\n\n");
+}
+
+// Cron diario
 cron.schedule("0 9 * * *", async () => {
   console.log("Daily check");
 
-  // Notificar vencen hoy
+  // Notify expiring today
   const expiring = await pool.query(`
     SELECT telegram_id, username
     FROM users
@@ -328,7 +333,7 @@ Telegram ID: ${u.telegram_id}`
     );
   }
 
-  // Auto-remove 3 días después de vencimiento
+  // Auto-remove after 3 days past end date
   const expired = await pool.query(`
     SELECT telegram_id, id, username, subscription_end
     FROM users
@@ -368,7 +373,7 @@ app.post("/webhook", async (req, res) => {
   const update = req.body;
   console.log("Webhook received:", JSON.stringify(update));
 
-  // 1) Nuevos miembros del grupo
+  // Nuevos miembros del grupo
   if (update.message?.new_chat_members) {
     const chatId = update.message.chat.id;
 
@@ -383,7 +388,6 @@ app.post("/webhook", async (req, res) => {
 
       await registerUser(member);
 
-      // Notificación estándar
       await sendMessage(
         ADMIN_ID,
         `👤 Usuario entró:
@@ -417,7 +421,6 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
     return res.sendStatus(200);
   }
 
-  // Si no hay message, nada que hacer
   if (!update.message) return res.sendStatus(200);
   const msg = update.message;
   const text = (msg.text || "").trim();
@@ -426,7 +429,36 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
   // Solo el admin puede ejecutar comandos
   if (msg.from.id !== ADMIN_ID) return res.sendStatus(200);
 
-  // 2) /month YYYY MM
+  // /help - resumen de funcionalidad
+  if (text === "/help" || text === "/start") {
+    const helpMsg = `
+🤖 MemberFlow - Comandos disponibles
+
+/renew TELEGRAM_ID
+   Inicia alta/renovación manual para un usuario.
+
+/stats
+   Muestra estadísticas del mes actual (activos, ingresos, altas, renovaciones).
+
+/month YYYY MM
+   Reporte de ingresos y renovaciones de un mes específico.
+   Ej: /month 2026 05
+
+/next [cantidad] [dias]
+   Lista los próximos usuarios en vencer.
+   Ej: /next        → próximos 10
+       /next 5      → próximos 5
+       /next 10 7   → 10 usuarios que vencen en los próximos 7 días.
+
+Además:
+- Cuando un usuario entra al grupo, el bot te abre automáticamente un flujo de alta/renovación (días, monto, método).
+- Todos los días a las 9am te avisa quién vence hoy y expulsa (con guardas) a los que llevan >3 días vencidos.
+`;
+    await sendMessage(chatId, helpMsg);
+    return res.sendStatus(200);
+  }
+
+  // /month YYYY MM
   if (text.startsWith("/month ")) {
     const parts = text.split(" ");
     const year = parts[1];
@@ -436,17 +468,16 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
     return res.sendStatus(200);
   }
 
-  // 3) /stats
+  // /stats
   if (text === "/stats") {
     const s = await stats();
     await sendMessage(chatId, s);
     return res.sendStatus(200);
   }
 
-  // 4) /next [limit] [daysAhead]
+  // /next [limit] [daysAhead]
   if (text.startsWith("/next")) {
     const parts = text.split(" ").filter(Boolean);
-    // /next
     let limit = 10;
     let daysAhead = null;
 
@@ -466,12 +497,12 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
       }
     }
 
-    const msg = await nextExpiring(limit, daysAhead);
-    await sendMessage(chatId, msg);
+    const msgNext = await nextExpiring(limit, daysAhead);
+    await sendMessage(chatId, msgNext);
     return res.sendStatus(200);
   }
 
-  // 5) /renew TELEGRAM_ID (flujo manual)
+  // /renew TELEGRAM_ID
   if (text.startsWith("/renew ")) {
     const telegramId = text.split(" ")[1];
     if (!telegramId || isNaN(telegramId)) {
@@ -487,7 +518,7 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
     return res.sendStatus(200);
   }
 
-  // 6) Flujo interactivo de adminSession
+  // Flujo interactivo de adminSession
   if (adminSession && adminSession.chatId === chatId) {
     const response = text;
 
