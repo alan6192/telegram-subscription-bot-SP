@@ -250,7 +250,7 @@ Altas nuevas: ${newSubs.rows[0].count}
 Renovaciones: ${renewals.rows[0].count}`;
 }
 
-// NUEVA función global: próximos en vencer
+// Próximos en vencer
 async function nextExpiring(limit = 10, daysAhead = null) {
   const lim = Math.min(Math.max(parseInt(limit) || 10, 1), 100);
 
@@ -333,7 +333,20 @@ Telegram ID: ${u.telegram_id}`
     );
   }
 
-  // Auto-remove after 3 days past end date
+  // Resumen de próximos a vencer (próximos 3 días)
+  try {
+    const resumen = await nextExpiring(10, 3);
+    if (!resumen.startsWith("📅 No hay usuarios")) {
+      await sendMessage(
+        ADMIN_ID,
+        `⏰ Recordatorio diario:\n${resumen}`
+      );
+    }
+  } catch (e) {
+    console.error("Error en nextExpiring dentro del cron:", e);
+  }
+
+  // Proponer expulsión después de 3 días sin renovar (sin ejecutar nada)
   const expired = await pool.query(`
     SELECT telegram_id, id, username, subscription_end
     FROM users
@@ -342,26 +355,24 @@ Telegram ID: ${u.telegram_id}`
       AND subscription_end <= (CURRENT_DATE - INTERVAL '3 days')
   `);
 
-  if (expired.rowCount > MAX_AUTOREMOVE_PER_RUN) {
-    await sendMessage(
-      ADMIN_ID,
-      `🚨 Seguridad: ${expired.rowCount} usuarios cumplen condición de expulsión.
-No se ejecutó auto-expulsión.
-Revisa users.subscription_end.`
-    );
-    return;
-  }
+  if (expired.rowCount > 0) {
+    let resumen = `⚠️ Usuarios con más de 3 días vencidos (${expired.rowCount}):\n\n`;
 
-  for (const u of expired.rows) {
-    await removeFromGroup(u.telegram_id);
-    await pool.query(`UPDATE users SET subscription_status='inactive' WHERE id=$1`, [u.id]);
-    await sendMessage(
-      ADMIN_ID,
-      `❌ Removido por no renovar:
-Username: ${u.username || "sin username"}
-Telegram ID: ${u.telegram_id}
-Venció: ${u.subscription_end}`
-    );
+    const lines = expired.rows.slice(0, 20).map((u, i) => {
+      const idx = i + 1;
+      return `${idx}) ${u.username || "sin username"} — ${u.telegram_id}
+   Venció: ${u.subscription_end}`;
+    });
+
+    resumen += lines.join("\n\n");
+
+    if (expired.rowCount > 20) {
+      resumen += `\n\n... y ${expired.rowCount - 20} más.`;
+    }
+
+    resumen += `\n\nNo se ha expulsado a nadie automáticamente.\nSi quieres removerlos, hazlo manualmente o añadimos un comando /cleanup más adelante.`;
+
+    await sendMessage(ADMIN_ID, resumen);
   }
 });
 
@@ -452,8 +463,7 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
 
 Además:
 - Cuando un usuario entra al grupo, el bot te abre automáticamente un flujo de alta/renovación (días, monto, método).
-- Todos los días a las 9am te avisa quién vence hoy y expulsa (con guardas) a los que llevan >3 días vencidos.
-`;
+- Todos los días a las 9am recibes recordatorio de vencimientos y una lista de quienes llevan más de 3 días vencidos (sin expulsarlos).`;
     await sendMessage(chatId, helpMsg);
     return res.sendStatus(200);
   }
