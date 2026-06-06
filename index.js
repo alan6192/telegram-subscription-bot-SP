@@ -387,7 +387,35 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
     return res.sendStatus(200);
   }
 
-  // 4) /renew TELEGRAM_ID (flujo manual)
+  // 4) /next [limit] [daysAhead]
+  if (text.startsWith("/next")) {
+    const parts = text.split(" ").filter(Boolean);
+    // /next
+    let limit = 10;
+    let daysAhead = null;
+
+    if (parts[1]) {
+      limit = parseInt(parts[1]);
+      if (isNaN(limit) || limit <= 0) {
+        await sendMessage(chatId, "❌ Uso: /next [cantidad] [dias]\nEj: /next 10 7 (10 usuarios que vencen en los próximos 7 días)");
+        return res.sendStatus(200);
+      }
+    }
+
+    if (parts[2]) {
+      daysAhead = parseInt(parts[2]);
+      if (isNaN(daysAhead) || daysAhead < 0) {
+        await sendMessage(chatId, "❌ Días inválidos. Usa un número >= 0.\nEj: /next 10 7");
+        return res.sendStatus(200);
+      }
+    }
+
+    const msg = await nextExpiring(limit, daysAhead);
+    await sendMessage(chatId, msg);
+    return res.sendStatus(200);
+  }
+
+  // 5) /renew TELEGRAM_ID (flujo manual)
   if (text.startsWith("/renew ")) {
     const telegramId = text.split(" ")[1];
     if (!telegramId || isNaN(telegramId)) {
@@ -403,7 +431,7 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
     return res.sendStatus(200);
   }
 
-  // 5) Flujo interactivo de adminSession
+  // 6) Flujo interactivo de adminSession
   if (adminSession && adminSession.chatId === chatId) {
     const response = text;
 
