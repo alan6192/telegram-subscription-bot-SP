@@ -312,14 +312,14 @@ async function nextExpiring(limit = 10, daysAhead = null) {
   return header + lines.join("\n\n");
 }
 
-// Obtener lista de usuarios con más de 3 días vencidos
+// Obtener lista de usuarios con más de 1 días vencidos
 async function getExpiredCandidates() {
   const res = await pool.query(`
     SELECT id, telegram_id, username, subscription_end
     FROM users
     WHERE subscription_status='active'
       AND subscription_end IS NOT NULL
-      AND subscription_end <= (CURRENT_DATE - INTERVAL '3 days')
+      AND subscription_end <= (CURRENT_DATE - INTERVAL '1 days')
     ORDER BY subscription_end ASC
   `);
   return res.rows;
