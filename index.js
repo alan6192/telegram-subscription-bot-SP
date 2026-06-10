@@ -259,6 +259,7 @@ async function nextExpiring(limit = 10, daysAhead = null) {
     SELECT
       telegram_id,
       username,
+      first_name,
       subscription_end,
       (subscription_end - CURRENT_DATE) AS days_left
     FROM users
@@ -291,7 +292,7 @@ async function nextExpiring(limit = 10, daysAhead = null) {
 
   const lines = res.rows.map((u, i) => {
     const idx = i + 1;
-    const username = u.username || "sin username";
+    const displayName = u.first_name || "Sin nombre";
     const endDateIso =
       typeof u.subscription_end === "string"
         ? u.subscription_end
@@ -306,7 +307,7 @@ async function nextExpiring(limit = 10, daysAhead = null) {
         : `en ${daysLeft} días`;
 
     return `${idx}) ${endDate} (${diasTexto})
-   ${username} — ${u.telegram_id}`;
+   Nombre: ${displayName} — Telegram ID: ${u.telegram_id}`;
   });
 
   return header + lines.join("\n\n");
@@ -315,7 +316,7 @@ async function nextExpiring(limit = 10, daysAhead = null) {
 // Obtener lista de usuarios con más de 1 días vencidos
 async function getExpiredCandidates() {
   const res = await pool.query(`
-    SELECT id, telegram_id, username, subscription_end
+    SELECT id, telegram_id, username, first_name, subscription_end
     FROM users
     WHERE subscription_status='active'
       AND subscription_end IS NOT NULL
@@ -331,7 +332,7 @@ cron.schedule("0 9 * * *", async () => {
 
   // Notify expiring today
   const expiring = await pool.query(`
-    SELECT telegram_id, username
+    SELECT telegram_id, username, first_name
     FROM users
     WHERE subscription_status='active'
       AND subscription_end IS NOT NULL
@@ -342,7 +343,7 @@ cron.schedule("0 9 * * *", async () => {
     await sendMessage(
       ADMIN_ID,
       `⚠️ Vence hoy:
-Username: ${u.username || "sin username"}
+Nombre: ${u.first_name || "Sin nombre"}
 Telegram ID: ${u.telegram_id}`
     );
   }
@@ -360,15 +361,16 @@ Telegram ID: ${u.telegram_id}`
     console.error("Error en nextExpiring dentro del cron:", e);
   }
 
-  // Solo informar quiénes llevan más de 3 días vencidos (sin expulsar)
+  // Solo informar quiénes llevan más de 1 días vencidos (sin expulsar)
   const expired = await getExpiredCandidates();
 
   if (expired.length > 0) {
-    let resumen = `⚠️ Usuarios con más de 3 días vencidos (${expired.length}):\n\n`;
+    let resumen = `⚠️ Usuarios con más de 1 día vencido (${expired.length}):\n\n`;
 
     const lines = expired.slice(0, 20).map((u, i) => {
       const idx = i + 1;
-      return `${idx}) ${u.username || "sin username"} — ${u.telegram_id}
+      const displayName = u.first_name || "Sin nombre";
+      return `${idx}) Nombre: ${displayName} — Telegram ID: ${u.telegram_id}
    Venció: ${u.subscription_end}`;
     });
 
@@ -410,7 +412,7 @@ app.post("/webhook", async (req, res) => {
       await sendMessage(
         ADMIN_ID,
         `👤 Usuario entró:
-Username: ${member.username || "sin username"}
+Nombre: ${member.first_name || "Sin nombre"}
 Telegram ID: ${member.id}`
       );
 
@@ -423,14 +425,14 @@ Telegram ID: ${member.id}`
 
         await sendMessage(
           ADMIN_ID,
-          `🚀 Nuevo miembro detectado: ${member.username || "sin username"} (${member.id})
+          `🚀 Nuevo miembro detectado: ${member.first_name || "Sin nombre"} (${member.id})
 
 ¿Cuántos días contrató?`
         );
       } else {
         await sendMessage(
           ADMIN_ID,
-          `ℹ️ Entró ${member.username || "sin username"} (${member.id}) pero ya hay una renovación en curso.
+          `ℹ️ Entró ${member.first_name || "Sin nombre"} (${member.id}) pero ya hay una renovación en curso.
 Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
         );
       }
@@ -469,11 +471,11 @@ Cuando termines, puedes usar /renew ${member.id} para procesarlo.`
        /next 10 7   → 10 usuarios que vencen en los próximos 7 días.
 
 /cleanup
-   Inicia un flujo para revisar usuarios con más de 3 días vencidos y expulsarlos uno por uno (con confirmación).
+   Inicia un flujo para revisar usuarios con más de 1 día vencido y expulsarlos uno por uno (con confirmación).
 
 Además:
 - Cuando un usuario entra al grupo, el bot te abre automáticamente un flujo de alta/renovación (días, monto, método).
-- Todos los días a las 9am recibes recordatorio de vencimientos y una lista de quienes llevan más de 3 días vencidos (sin expulsarlos).`;
+- Todos los días a las 9am recibes recordatorio de vencimientos y una lista de quienes llevan más de 1 día vencido (sin expulsarlos).`;
     await sendMessage(chatId, helpMsg);
     return res.sendStatus(200);
   }
@@ -527,7 +529,7 @@ Además:
     const candidates = await getExpiredCandidates();
 
     if (!candidates.length) {
-      await sendMessage(chatId, "✅ No hay usuarios con más de 3 días vencidos.");
+      await sendMessage(chatId, "✅ No hay usuarios con más de 1 día vencido.");
       return res.sendStatus(200);
     }
 
@@ -538,12 +540,13 @@ Además:
     };
 
     const u = candidates[0];
+    const displayName = u.first_name || "Sin nombre";
     await sendMessage(
       chatId,
       `🧹 Limpieza de usuarios vencidos (uno por uno)
 
 Usuario 1 de ${candidates.length}:
-Username: ${u.username || "sin username"}
+Nombre: ${displayName}
 Telegram ID: ${u.telegram_id}
 Venció: ${u.subscription_end}
 
@@ -584,6 +587,7 @@ Responde: sí / no / stop`
     }
 
     const current = users[idx];
+    const currentName = current.first_name || "Sin nombre";
 
     if (answer === "sí" || answer === "si") {
       // expulsar
@@ -595,14 +599,14 @@ Responde: sí / no / stop`
       await sendMessage(
         chatId,
         `❌ Usuario expulsado:
-Username: ${current.username || "sin username"}
+Nombre: ${currentName}
 Telegram ID: ${current.telegram_id}`
       );
     } else if (answer === "no") {
       await sendMessage(
         chatId,
         `✔️ Usuario conservado:
-Username: ${current.username || "sin username"}
+Nombre: ${currentName}
 Telegram ID: ${current.telegram_id}`
       );
     } else {
@@ -618,10 +622,11 @@ Telegram ID: ${current.telegram_id}`
     } else {
       cleanupSession.index = idx;
       const nextUser = users[idx];
+      const nextName = nextUser.first_name || "Sin nombre";
       await sendMessage(
         chatId,
         `Usuario ${idx + 1} de ${users.length}:
-Username: ${nextUser.username || "sin username"}
+Nombre: ${nextName}
 Telegram ID: ${nextUser.telegram_id}
 Venció: ${nextUser.subscription_end}
 
